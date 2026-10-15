@@ -105,6 +105,8 @@ end-to-end check in a throwaway headless GNOME Shell.
 
 Text recognition and QR scanning run entirely on your computer. Nothing is kept unless you
 press Enter; then the image is saved to your Pictures folder and the memory log is written to
-`~/.local/share/screenvision/memories/`, readable only by you. *Settings → General → Memory*
+`~/.local/share/screenvision/memories/`, readable only by you. Passwords and keys never reach
+the log: they are replaced by a label such as `[hidden password]` (see `lib/secrets.js`), and a
+memory that had one keeps no link to its screenshot. *Settings → General → Memory*
 turns remembering off and has a **Forget All** button. Google Lens uploads the selection to
 Google, and only when you choose it.

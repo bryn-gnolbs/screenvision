@@ -530,15 +530,19 @@ export class LiveVisionController {
 
         try {
             const image = await saveScreenshot(capture.png);
+            let entry = null;
             if (this._config.remember) {
-                await this._memory.remember(makeEntry({
+                entry = await this._memory.remember(makeEntry({
                     ...this._selected,
                     image,
                     source: this._source,
                     rect: selection,
                 }));
             }
-            this.flash(this._config.remember ? _('Remembered') : _('Saved to Screenshots'));
+            if (!entry)
+                this.flash(_('Saved to Screenshots'));
+            else
+                this.flash(entry.hidden.length ? _('Remembered, passwords and keys hidden') : _('Remembered'));
         } catch (e) {
             logError('Remembering failed', e);
             this.flash(_('Could not save: %s').format(e.message));

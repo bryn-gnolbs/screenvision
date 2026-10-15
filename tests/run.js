@@ -21,6 +21,7 @@ import {
     ClickCounter, boundingRect, lineHighlights, lineRange, nearestWord, selectedWords, wordAt,
 } from '../lib/textSelection.js';
 import {MemoryStore, makeEntry} from '../lib/memory.js';
+import {looksRandom, redactText} from '../lib/secrets.js';
 import {saveScreenshot, screenshotBaseName} from '../lib/screenshotFile.js';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import {dropLonelyFragments, hasLettersOrDigits, isPlausibleWord, parseTsv, wordsToText} from '../lib/ocrText.js';
@@ -357,6 +358,45 @@ test('makeEntry collects links, emails and codes from what was seen', () => {
         [{type: 'QR-Code', data: 'https://qr.example/x'}], {x: 1, y: 3, width: 10, height: 20},
         '2026-10-15T10:00:00.000Z',
     ]);
+});
+
+// Fake secrets are split by '{{}}' in the files so secret scanners never see a whole one.
+const unsplit = text => text.replaceAll('{{}}', '');
+const SECRET_CASES = JSON.parse(unsplit(new TextDecoder().decode(
+    GLib.file_get_contents(GLib.build_filenamev([GLib.path_get_dirname(System.programPath),
+        'fixtures', 'secret-cases.json']))[1])));
+
+test('redactText hides every shared-case secret and names it', () => {
+    for (const {text, secret, label} of SECRET_CASES.hide) {
+        const result = redactText(text);
+        if (result.text.includes(secret) || !result.text.includes(`[hidden ${label}]`))
+            throw new Error(`not hidden: ${JSON.stringify(result.text)}`);
+        if (!result.hidden.includes(label))
+            throw new Error(`label ${label} missing from ${JSON.stringify(result.hidden)}`);
+        assertEqual(redactText(result.text), {text: result.text, hidden: []});
+    }
+});
+
+test('redactText keeps ordinary text', () => {
+    for (const text of SECRET_CASES.keep)
+        assertEqual(redactText(text), {text, hidden: []});
+    assertEqual([looksRandom('Xq7Lm2Pz9Kd4Wt8Rb3Nv6Hy'), looksRandom('ScreenVisionOverlayController2')], [true, false]);
+});
+
+test('makeEntry hides secrets everywhere and drops the screenshot', () => {
+    const entry = makeEntry({
+        text: 'login https://bryn:S3cretPassw0rd@db.example.com password: hunter2!',
+        codes: [{type: 'QR-Code', data: 'WIFI:T:WPA;S:Home;P:pa55word-for-wifi;;'}],
+        source: {app: 'Firefox', title: unsplit('Users AVNS{{}}_Fk3mQ9zLx2PwRt7Yv')},
+        image: '/home/bryn/Pictures/Screenshots/shot.png',
+    });
+    const stored = JSON.stringify(entry);
+    for (const secret of ['S3cretPassw0rd', 'hunter2!', 'pa55word-for-wifi', unsplit('AVNS{{}}_Fk3mQ9zLx2PwRt7Yv')]) {
+        if (stored.includes(secret))
+            throw new Error(`${secret} was stored`);
+    }
+    assertEqual([entry.image, entry.hidden], [null, ['password', 'Wi-Fi password', 'DigitalOcean database password']]);
+    assertEqual(makeEntry({text: 'hello', image: '/tmp/a.png'}).image, '/tmp/a.png');
 });
 
 test('MemoryStore appends privately, lists and forgets', async () => {
