@@ -27,7 +27,7 @@ cp "$PROJECT"/tests/smoke/driver/* "$EXT_DIR/ssv-smoke-driver@test/"
 cp "$PROJECT"/tests/fixtures/qr-codes.png "$EXT_DIR/ssv-smoke-driver@test/"
 # The driver reads the memory log through the extension's own module.
 mkdir -p "$EXT_DIR/ssv-smoke-driver@test/lib"
-cp "$PROJECT"/lib/memory.js "$PROJECT"/lib/intents.js "$EXT_DIR/ssv-smoke-driver@test/lib/"
+cp "$PROJECT"/lib/memory.js "$PROJECT"/lib/intents.js "$PROJECT"/lib/secrets.js "$EXT_DIR/ssv-smoke-driver@test/lib/"
 
 # Pictures must point into the sandbox: "Remember" saves screenshots there,
 # and nothing may land in the real ~/Pictures.
