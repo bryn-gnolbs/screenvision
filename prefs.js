@@ -16,7 +16,7 @@ import {
 } from './lib/common.js';
 import {interpretKeyPress} from './lib/shortcutKeys.js';
 
-export default class SmartScreenVisionPreferences extends ExtensionPreferences {
+export default class ScreenVisionPreferences extends ExtensionPreferences {
     async fillPreferencesWindow(window) {
         const settings = this.getSettings();
         const languages = await listTesseractLanguages();

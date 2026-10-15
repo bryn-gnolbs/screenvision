@@ -1,13 +1,13 @@
 {
   "name": "ScreenVision",
   "description": "Text recognition, QR scanning and Google Lens search inside the GNOME screenshot tool. Based on Shotzy by Samkit Jain.",
-  "uuid": "smart-screenvision@genolabs.net",
-  "settings-schema": "org.gnome.shell.extensions.smart-screenvision",
-  "gettext-domain": "smart-screenvision",
+  "uuid": "screenvision@genolabs.net",
+  "settings-schema": "org.gnome.shell.extensions.screenvision",
+  "gettext-domain": "screenvision",
   "shell-version": [
     "49",
     "50"
   ],
-  "url": "https://github.com/bryn-gnolbs/smart-screenvision",
+  "url": "https://github.com/bryn-gnolbs/screenvision",
   "version": 1
 }

@@ -12,7 +12,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const UUID = 'smart-screenvision@genolabs.net';
+const UUID = 'screenvision@genolabs.net';
 const OUT_DIR = GLib.getenv('SSV_SMOKE_OUT');
 const SAMPLE_TEXT = 'ScreenVision reads this 2026';
 

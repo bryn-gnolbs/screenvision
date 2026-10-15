@@ -62,7 +62,7 @@ class Tooltip extends St.Label {
     }
 });
 
-export default class SmartScreenVisionExtension extends Extension {
+export default class ScreenVisionExtension extends Extension {
     enable() {
         const ui = Main.screenshotUI;
         if (!ui)

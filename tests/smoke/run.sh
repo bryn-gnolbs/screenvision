@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")/../.." && pwd)"
-ZIP="$PROJECT/build/smart-screenvision@genolabs.net.shell-extension.zip"
+ZIP="$PROJECT/build/screenvision@genolabs.net.shell-extension.zip"
 OUT="$(mktemp -d -t ssv-smoke-XXXXXX)"
 [ -f "$ZIP" ] || { echo "Missing $ZIP - run 'make pack' first" >&2; exit 2; }
 
@@ -21,8 +21,8 @@ export XDG_RUNTIME_DIR="$(mktemp -d /tmp/ssv-rt-XXXXXX)"
 trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
 export GSETTINGS_BACKEND=memory SSV_SMOKE_OUT="$OUT"
 EXT_DIR="$XDG_DATA_HOME/gnome-shell/extensions"
-mkdir -p "$EXT_DIR/smart-screenvision@genolabs.net" "$EXT_DIR/ssv-smoke-driver@test"
-unzip -q "$ZIP" -d "$EXT_DIR/smart-screenvision@genolabs.net"
+mkdir -p "$EXT_DIR/screenvision@genolabs.net" "$EXT_DIR/ssv-smoke-driver@test"
+unzip -q "$ZIP" -d "$EXT_DIR/screenvision@genolabs.net"
 cp "$PROJECT"/tests/smoke/driver/* "$EXT_DIR/ssv-smoke-driver@test/"
 unset WAYLAND_DISPLAY DISPLAY
 
@@ -33,7 +33,7 @@ timeout 120 dbus-run-session -- bash -c '
         gdbus introspect --session --dest org.gnome.Shell --object-path /org/gnome/Shell >/dev/null 2>&1 && break
         sleep 0.5
     done
-    gnome-extensions enable smart-screenvision@genolabs.net
+    gnome-extensions enable screenvision@genolabs.net
     gnome-extensions enable ssv-smoke-driver@test
     for _ in $(seq 120); do grep -q "SMOKE done" "$SSV_SMOKE_OUT/shell.log" && break; sleep 0.5; done
     kill $shell; wait $shell 2>/dev/null || true

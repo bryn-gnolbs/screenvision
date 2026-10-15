@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.smart-screenvision"
-          path="/org/gnome/shell/extensions/smart-screenvision/">
+  <schema id="org.gnome.shell.extensions.screenvision"
+          path="/org/gnome/shell/extensions/screenvision/">
     <key name="highlight-fill-color" type="s">
       <default>'0.10,0.11,0.13,0.34'</default>
       <summary>Highlight fill color</summary>

@@ -14,13 +14,19 @@ import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
 
 const LENS_UPLOAD_URL = 'https://lens.google.com/v3/upload';
-const SERVE_TIMEOUT_SECONDS = 120;
+const SERVE_TIMEOUT_MS = 120_000;
 // Leave the page a moment to finish submitting after it fetched the image.
-const SHUTDOWN_DELAY_SECONDS = 5;
+const SHUTDOWN_DELAY_MS = 5_000;
 
 export class LensLauncher {
-    constructor() {
+    /**
+     * @param {object} [options]
+     * @param {number} [options.shutdownDelayMs] - how long to keep serving
+     *   after the image was fetched (tests use a short delay)
+     */
+    constructor({shutdownDelayMs = SHUTDOWN_DELAY_MS} = {}) {
         this._handoffs = new Set();
+        this._shutdownDelayMs = shutdownDelayMs;
     }
 
     destroy() {
@@ -38,7 +44,7 @@ export class LensLauncher {
      * @returns {string} http://127.0.0.1 URL to open in the browser
      */
     serve(pngBytes, width, height) {
-        const handoff = new LensHandoff(pngBytes, width, height,
+        const handoff = new LensHandoff(pngBytes, width, height, this._shutdownDelayMs,
             () => this._handoffs.delete(handoff));
         this._handoffs.add(handoff);
         return handoff.url;
@@ -46,8 +52,9 @@ export class LensLauncher {
 }
 
 class LensHandoff {
-    constructor(pngBytes, width, height, onStopped) {
+    constructor(pngBytes, width, height, shutdownDelayMs, onStopped) {
         this._png = pngBytes;
+        this._shutdownDelayMs = shutdownDelayMs;
         this._width = width;
         this._height = height;
         this._onStopped = onStopped;
@@ -63,7 +70,7 @@ class LensHandoff {
         const port = this._server.get_uris()[0].get_port();
         this.url = `http://127.0.0.1:${port}/${this._token}/`;
 
-        this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SERVE_TIMEOUT_SECONDS, () => {
+        this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SERVE_TIMEOUT_MS, () => {
             this._timeoutId = 0;
             this.stop();
             return GLib.SOURCE_REMOVE;
@@ -112,7 +119,7 @@ class LensHandoff {
         if (this._timeoutId)
             GLib.source_remove(this._timeoutId);
 
-        this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SHUTDOWN_DELAY_SECONDS, () => {
+        this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._shutdownDelayMs, () => {
             this._timeoutId = 0;
             this.stop();
             return GLib.SOURCE_REMOVE;

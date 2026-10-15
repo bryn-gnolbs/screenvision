@@ -134,7 +134,7 @@ const wait = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT
 
 test('Lens hand-off serves the page and exact image, then shuts down', async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
-    const launcher = new LensLauncher();
+    const launcher = new LensLauncher({shutdownDelayMs: 100});
     const url = launcher.serve(png, 640, 480);
     const session = new Soup.Session();
 
@@ -152,7 +152,7 @@ test('Lens hand-off serves the page and exact image, then shuts down', async () 
     const image = await httpGet(session, `${url}image.png`);
     assertEqual([image.status, [...image.body]], [200, [...png]]);
 
-    await wait(5500);
+    await wait(400);
     assertEqual(launcher._handoffs.size, 0);
     launcher.destroy();
 });

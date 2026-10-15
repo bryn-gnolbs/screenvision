@@ -27,7 +27,7 @@ echo "      and the Search button on your real desktop instead."
 MUTTER_DEBUG_DUMMY_MODE_SPECS=1600x900 \
     dbus-run-session gnome-shell --devkit --wayland 2>&1 \
     | tee "$LOG" \
-    | grep --line-buffered -iE "screenvision|JS ERROR|^\s*[a-zA-Z_]*@file://.*smart-screenvision"
+    | grep --line-buffered -iE "screenvision|JS ERROR|^\s*[a-zA-Z_]*@file://.*screenvision"
 
 if [ "$existed" = 0 ] && [ -e "$CRASH_FILE" ]; then
     rm -f "$CRASH_FILE"

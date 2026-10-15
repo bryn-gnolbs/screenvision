@@ -114,7 +114,7 @@ a screenshot (`ocr.png`) in the folder it prints.
 - `gnome-extensions pack` does **not** compile the GSettings schema on GNOME 50, so the
   Makefile compiles it and adds `schemas/gschemas.compiled` to the zip. Without it the
   extension fails to enable.
-- The UUID (`smart-screenvision@genolabs.net`) must match the install folder name and
+- The UUID (`screenvision@genolabs.net`) must match the install folder name and
   stay stable once published.
 
 ## Useful references

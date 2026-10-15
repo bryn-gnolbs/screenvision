@@ -1,6 +1,6 @@
 # Common development tasks. Run `make help` for the list.
 
-UUID := smart-screenvision@genolabs.net
+UUID := screenvision@genolabs.net
 ZIP := build/$(UUID).shell-extension.zip
 SOURCES := $(shell git ls-files '*.js' '*.css' '*.json' '*.xml' 2>/dev/null)
 
