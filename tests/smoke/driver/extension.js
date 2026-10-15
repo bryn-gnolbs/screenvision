@@ -1,0 +1,112 @@
+// Scripted end-to-end check, loaded next to Smart ScreenVision inside a
+// headless GNOME Shell (see run.sh). It puts text on screen, opens the
+// screenshot UI, selects the text and reports what the extension did as
+// "SMOKE <name> <json>" lines in the shell log.
+
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import Shell from 'gi://Shell';
+import St from 'gi://St';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+const UUID = 'smart-screenvision@genolabs.net';
+const OUT_DIR = GLib.getenv('SSV_SMOKE_OUT');
+const SAMPLE_TEXT = 'Smart ScreenVision reads this 2026';
+
+const sleep = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+    resolve();
+    return GLib.SOURCE_REMOVE;
+}));
+const report = (name, value) => console.log(`SMOKE ${name} ${JSON.stringify(value)}`);
+const check = (name, ok, detail) => report(ok ? `PASS ${name}` : `FAIL ${name}`, detail);
+
+async function saveScreenshot(name) {
+    const file = Gio.File.new_for_path(GLib.build_filenamev([OUT_DIR, name]));
+    const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+    await new Promise((resolve, reject) => {
+        new Shell.Screenshot().screenshot(false, stream, (shooter, result) => {
+            try {
+                resolve(shooter.screenshot_finish(result));
+            } catch (e) {
+                reject(e);
+            }
+        });
+    });
+    stream.close(null);
+}
+
+function selectArea(ui, x1, y1, x2, y2) {
+    const selector = ui._areaSelector;
+    [selector._startX, selector._startY, selector._lastX, selector._lastY] = [x1, y1, x2, y2];
+    selector._updateSelectionRect();
+    selector.emit('drag-ended');
+}
+
+async function run() {
+    await sleep(2500);
+    const info = Main.extensionManager.lookup(UUID);
+    check('extension enabled', info?.state === 1, info?.error ?? info?.state);
+    const ext = () => Main.extensionManager.lookup(UUID).stateObj;
+
+    const label = new St.Label({
+        text: SAMPLE_TEXT,
+        style: 'font-size: 40px; color: black; background-color: white; padding: 24px;',
+    });
+    Main.layoutManager.uiGroup.add_child(label);
+    label.set_position(300, 300);
+    await sleep(500);
+
+    const ui = Main.screenshotUI;
+    await ui.open();
+    ui._selectionButton.checked = true;
+    selectArea(ui, 280, 280, 1200, 420);
+    await sleep(4000);
+
+    check('ocr text', ext()._ocr._text === SAMPLE_TEXT, ext()._ocr._text);
+    check('text menu shown', ext()._ocr._menu.visible, ext()._ocr._menu.get_position());
+    check('lens button shown', ext()._lensButton.visible);
+    check('qr button in side column', ext()._qrButton.get_parent() === ext()._sideBox);
+    await saveScreenshot('ocr.png');
+
+    await ext()._scanQrCode(ui);
+    check('qr reports no code', ext()._toast?.text === 'No QR code found in the selection', ext()._toast?.text);
+
+    ext()._ocr._copyText();
+    const clip = await new Promise(resolve =>
+        St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, text) => resolve(text)));
+    check('copy puts text on clipboard', clip === SAMPLE_TEXT, clip);
+
+    ui.close();
+    await sleep(800);
+
+    const panelRows = () => ui._panel.get_children().map(child =>
+        child === ui._typeButtonContainer ? 'type' : child === ui._bottomRowContainer ? 'bottom' : 'other');
+
+    Main.extensionManager.disableExtension(UUID);
+    await sleep(500);
+    check('disable restores toolbar', JSON.stringify(panelRows()) === '["type","bottom"]', panelRows());
+    check('disable restores open()', !Object.hasOwn(ui, 'open') || ui.open === Object.getPrototypeOf(ui).open);
+    check('disable removes lens button', ui._showPointerButtonContainer.get_n_children() === 1);
+
+    Main.extensionManager.enableExtension(UUID);
+    await sleep(500);
+    check('re-enable works', Main.extensionManager.lookup(UUID).state === 1);
+
+    ext()._settings.set_boolean('show-qr-button', false);
+    check('hiding qr restores toolbar', JSON.stringify(panelRows()) === '["type","bottom"]', panelRows());
+    ext()._settings.set_boolean('show-qr-button', true);
+    check('showing qr wraps toolbar', JSON.stringify(panelRows()) === '["other"]', panelRows());
+}
+
+export default class SmokeDriver extends Extension {
+    enable() {
+        run()
+            .catch(e => report('FAIL driver crashed', `${e.message}\n${e.stack}`))
+            .finally(() => report('done', true));
+    }
+
+    disable() {
+    }
+}

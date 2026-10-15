@@ -1,0 +1,110 @@
+// Unit tests for the shell-independent helpers. Run with `make test`
+// (or `gjs -m tests/run.js`). Exits non-zero if any test fails.
+
+import GLib from 'gi://GLib';
+import System from 'system';
+
+import {
+    buildSearchUrl, deleteFile, normalizeLanguageSelection, parseRgbaSetting,
+    parseTesseractLanguages, runCommand, writePrivateTempFile,
+} from '../lib/common.js';
+import {parseTsv, wordsToText} from '../lib/ocrText.js';
+
+const tests = [];
+const test = (name, fn) => tests.push({name, fn});
+
+function assertEqual(actual, expected) {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    if (a !== e)
+        throw new Error(`expected ${e}\n         got ${a}`);
+}
+
+const TSV_HEADER = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext';
+const tsvRow = (block, line, word, left, top, conf, text) =>
+    `5\t1\t${block}\t1\t${line}\t${word}\t${left}\t${top}\t40\t20\t${conf}\t${text}`;
+
+test('parseTsv keeps confident words and maps to stage coordinates', () => {
+    const tsv = [
+        TSV_HEADER,
+        '1\t1\t0\t0\t0\t0\t0\t0\t800\t600\t-1\t',
+        tsvRow(1, 1, 1, 100, 50, 96, 'Hello'),
+        tsvRow(1, 1, 2, 150, 50, 3, 'noise'),
+    ].join('\n');
+
+    const words = parseTsv(tsv, {scale: 2, offsetX: 10, offsetY: 20, minConfidence: 10});
+    assertEqual(words, [{x: 60, y: 45, width: 20, height: 10, text: 'Hello', lineKey: '1:1:1:1'}]);
+});
+
+test('wordsToText joins words per Tesseract line', () => {
+    const tsv = [
+        TSV_HEADER,
+        tsvRow(1, 1, 1, 0, 0, 90, 'first'),
+        tsvRow(1, 1, 2, 50, 2, 90, 'line'),
+        // Same y as the line above but a different block: a second column.
+        tsvRow(2, 1, 1, 400, 0, 90, 'column'),
+        tsvRow(1, 2, 1, 0, 40, 90, 'second'),
+    ].join('\n');
+
+    assertEqual(wordsToText(parseTsv(tsv)), 'first line\ncolumn\nsecond');
+});
+
+test('parseTesseractLanguages hides osd and the header', () => {
+    const output = 'List of available languages in "/usr/share/tessdata/" (3):\ndeu\neng\nosd\n';
+    assertEqual(parseTesseractLanguages(output), ['deu', 'eng']);
+});
+
+test('normalizeLanguageSelection filters and falls back', () => {
+    assertEqual(normalizeLanguageSelection(['deu', 'xyz', 'deu', 'bad code'], ['deu', 'eng']), ['deu']);
+    assertEqual(normalizeLanguageSelection([], ['deu', 'eng']), ['eng']);
+    assertEqual(normalizeLanguageSelection([], ['fra']), ['fra']);
+    assertEqual(normalizeLanguageSelection(['fra'], null), ['fra']);
+});
+
+test('parseRgbaSetting validates and clamps', () => {
+    assertEqual(parseRgbaSetting('0.1,0.2,0.3,2', null), [0.1, 0.2, 0.3, 1]);
+    assertEqual(parseRgbaSetting('nonsense', [0, 0, 0, 1]), [0, 0, 0, 1]);
+});
+
+test('buildSearchUrl encodes text and falls back to Google', () => {
+    assertEqual(buildSearchUrl('duckduckgo', 'a b&c'), 'https://duckduckgo.com/?q=a%20b%26c');
+    assertEqual(buildSearchUrl('unknown', 'x'), 'https://www.google.com/search?q=x');
+});
+
+test('writePrivateTempFile creates an owner-only file in the runtime dir', () => {
+    const path = writePrivateTempFile(new TextEncoder().encode('hi'), '.txt');
+    try {
+        if (!path.startsWith(GLib.get_user_runtime_dir()))
+            throw new Error(`not in runtime dir: ${path}`);
+        const [, contents] = GLib.file_get_contents(path);
+        assertEqual(new TextDecoder().decode(contents), 'hi');
+    } finally {
+        deleteFile(path);
+    }
+    assertEqual(GLib.file_test(path, GLib.FileTest.EXISTS), false);
+});
+
+test('runCommand feeds stdin and captures output', async () => {
+    const result = await runCommand(['cat'], {input: new TextEncoder().encode('piped')});
+    assertEqual([result.success, result.stdout], [true, 'piped']);
+});
+
+const loop = new GLib.MainLoop(null, false);
+let failures = 0;
+
+(async () => {
+    for (const {name, fn} of tests) {
+        try {
+            await fn();
+            print(`ok   ${name}`);
+        } catch (e) {
+            failures++;
+            print(`FAIL ${name}\n     ${e.message}`);
+        }
+    }
+    print(`\n${tests.length - failures}/${tests.length} passed`);
+    loop.quit();
+})();
+
+loop.run();
+System.exit(failures > 0 ? 1 : 0);

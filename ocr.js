@@ -1,13 +1,22 @@
+// OCR inside the screenshot UI: runs Tesseract on the selected area, draws a
+// highlight box around each recognised word and shows a Copy / Search menu.
+
 import Clutter from 'gi://Clutter';
 import Cairo from 'gi://cairo';
-import Gio from 'gi://Gio';
 import GdkPixbuf from 'gi://GdkPixbuf';
-import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
-import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+import {captureSelection, isSelectionMode} from './capture.js';
+import {
+    buildSearchUrl, clamp, hasProgram, listTesseractLanguages, logError,
+    normalizeLanguageSelection, parseRgbaSetting, runCommand,
+} from './lib/common.js';
+import {parseTsv, wordsToText} from './lib/ocrText.js';
 
 const DEFAULT_STYLE = {
     fill: [0.10, 0.11, 0.13, 0.34],
@@ -19,15 +28,10 @@ const DEFAULT_STYLE = {
     borderWidth: 1.25,
 };
 
-const DEFAULT_OCR = {
-    enabled: true,
-    confidence: 10,
-    maxEdge: 2400,
-    languages: ['eng'],
-    searchEngine: 'google',
-    closeAfterCopy: false,
-};
-const TESSDATA_DIR = GLib.getenv('TESSDATA_PREFIX') || '/usr/share/tessdata';
+// Tesseract page segmentation modes, tried in order until one finds words.
+// Automatic layout (3) handles text on mixed backgrounds and keeps reading
+// order; sparse text (11) catches scattered labels that 3 sometimes misses.
+const TESSERACT_PAGE_MODES = ['3', '11'];
 
 const OCRHighlightOverlay = GObject.registerClass(
 class OCRHighlightOverlay extends St.DrawingArea {
@@ -54,32 +58,32 @@ class OCRHighlightOverlay extends St.DrawingArea {
 
     vfunc_repaint() {
         const cr = this.get_context();
-        const shadow = [0, 0, 0, this._style.shadowOpacity];
+        const style = this._style;
 
         cr.setOperator(Cairo.Operator.CLEAR);
         cr.paint();
         cr.setOperator(Cairo.Operator.OVER);
 
         for (const box of this._boxes) {
-            const x = box.x - this._style.padding;
-            const y = box.y - this._style.padding;
-            const width = box.width + this._style.padding * 2;
-            const height = box.height + this._style.padding * 2;
-            const radius = Math.min(this._style.radius, width / 2, height / 2);
+            const x = box.x - style.padding;
+            const y = box.y - style.padding;
+            const width = box.width + style.padding * 2;
+            const height = box.height + style.padding * 2;
+            const radius = Math.min(style.radius, width / 2, height / 2);
 
-            cr.setSourceRGBA(...shadow);
-            _roundedRect(cr, x, y + 2, width, height, radius + 1);
+            cr.setSourceRGBA(0, 0, 0, style.shadowOpacity);
+            roundedRect(cr, x, y + 2, width, height, radius + 1);
             cr.fill();
 
-            cr.setSourceRGBA(...this._style.fill);
-            _roundedRect(cr, x, y, width, height, radius);
+            cr.setSourceRGBA(...style.fill);
+            roundedRect(cr, x, y, width, height, radius);
             cr.fillPreserve();
 
-            cr.setSourceRGBA(...this._style.border);
-            cr.setLineWidth(this._style.borderWidth);
+            cr.setSourceRGBA(...style.border);
+            cr.setLineWidth(style.borderWidth);
             cr.stroke();
 
-            cr.setSourceRGBA(...this._style.glow);
+            cr.setSourceRGBA(...style.glow);
             cr.setLineWidth(1);
             cr.moveTo(x + radius, y + 1.5);
             cr.lineTo(x + width - radius, y + 1.5);
@@ -91,241 +95,222 @@ class OCRHighlightOverlay extends St.DrawingArea {
 });
 
 export class ScreenshotOCRController {
-    constructor(settings = null, showMessage = null) {
+    /**
+     * @param {Gio.Settings} settings - extension settings
+     * @param {function(string): void} showMessage - shows a toast in the screenshot UI
+     */
+    constructor(settings, showMessage) {
         this._settings = settings;
         this._showMessage = showMessage;
         this._overlay = null;
-        this._hitboxLayer = null;
-        this._copyMenu = null;
-        this._copyButton = null;
-        this._searchButton = null;
-        this._activeBoxText = '';
-        this._selectionBoxes = [];
-        this._runId = 0;
-        this._subprocess = null;
+        this._menuLayer = null;
+        this._menu = null;
+        this._text = '';
+        this._words = [];
         this._selectionKey = null;
-        this._settingsChangedId = 0;
-        this._style = DEFAULT_STYLE;
-        this._ocrConfig = DEFAULT_OCR;
+        this._cancellable = null;
+        this._installedLanguages = Promise.resolve(null);
+        this._warnedMissingTesseract = false;
 
-        if (this._settings) {
+        this._reloadSettings();
+        this._settings.connectObject('changed', () => {
             this._reloadSettings();
-            this._settingsChangedId = this._settings.connect('changed', () => {
-                this._reloadSettings();
+            this._overlay?.setStyle(this._style);
 
-                if (this._overlay)
-                    this._overlay.setStyle(this._style);
-
-                if (!this._ocrConfig.enabled)
-                    this.reset();
-                else
-                    this.refreshSelection(Main.screenshotUI);
-            });
-        }
+            if (this._config.enabled)
+                this.refreshSelection(Main.screenshotUI);
+            else
+                this.reset();
+        }, this);
     }
 
     destroy() {
         this.reset();
+        this._settings.disconnectObject(this);
 
-        if (this._settings && this._settingsChangedId) {
-            this._settings.disconnect(this._settingsChangedId);
-            this._settingsChangedId = 0;
-        }
-
-        if (this._overlay) {
-            this._overlay.destroy();
-            this._overlay = null;
-        }
-
-        if (this._hitboxLayer) {
-            this._copyMenu?.destroy();
-            this._copyMenu = null;
-            this._copyButton?.destroy();
-            this._copyButton = null;
-            this._searchButton?.destroy();
-            this._searchButton = null;
-            this._hitboxLayer.destroy();
-            this._hitboxLayer = null;
-        }
+        this._overlay?.destroy();
+        this._overlay = null;
+        this._menuLayer?.destroy();
+        this._menuLayer = null;
+        this._menu = null;
     }
 
+    /** Forget results and stop any running recognition. */
     reset() {
-        this._runId++;
-        this._cancelActiveSubprocess();
-        this._selectionBoxes = [];
+        this._cancellable?.cancel();
+        this._cancellable = null;
+        this._words = [];
         this._selectionKey = null;
 
-        if (this._overlay)
-            this._overlay.setBoxes([]);
-
-        this._rebuildHitboxes([], null);
-        this._hideCopyMenu();
+        this._overlay?.setBoxes([]);
+        this._hideMenu();
     }
 
-    ensureAttached(ui) {
-        if (this._overlay && this._hitboxLayer)
+    /** Called each time the screenshot UI opens. */
+    onOpened(ui) {
+        this._ensureAttached(ui);
+        this._warnedMissingTesseract = false;
+
+        // Language packs can be installed while the shell runs, so re-check.
+        this._installedLanguages = listTesseractLanguages();
+
+        if (isSelectionMode(ui))
+            this.recognizeSelection(ui).catch(e => logError('OCR failed', e));
+        else
+            this.reset();
+    }
+
+    /** Re-position highlights while the selection rectangle moves. */
+    refreshSelection(ui) {
+        if (!this._overlay || !ui || !this._config.enabled || !isSelectionMode(ui)) {
+            this._overlay?.setBoxes([]);
+            this._hideMenu();
+            return;
+        }
+
+        const selection = this._getSelection(ui);
+        if (!selection || this._makeKey(selection) !== this._selectionKey) {
+            // The selection changed since the last OCR run; hide stale boxes
+            // until the drag ends and recognizeSelection() runs again.
+            this._overlay.setBoxes([]);
+            this._hideMenu();
+            return;
+        }
+
+        this._overlay.set_size(global.stage.width, global.stage.height);
+        this._overlay.setBoxes(this._words);
+        this._showMenu(selection);
+    }
+
+    /** Run OCR on the current selection, unless it was already done. */
+    async recognizeSelection(ui) {
+        if (!this._config.enabled || !isSelectionMode(ui))
             return;
 
+        if (!hasProgram('tesseract')) {
+            if (!this._warnedMissingTesseract) {
+                this._warnedMissingTesseract = true;
+                this._showMessage(_('Install Tesseract to recognise text'));
+            }
+            return;
+        }
+
+        const selection = this._getSelection(ui);
+        const key = this._makeKey(selection);
+        if (!key)
+            return;
+
+        if (key === this._selectionKey && this._words.length > 0) {
+            this.refreshSelection(ui);
+            return;
+        }
+
+        this.reset();
+        const cancellable = new Gio.Cancellable();
+        this._cancellable = cancellable;
+
+        try {
+            const capture = await captureSelection(ui);
+            if (!capture || cancellable.is_cancelled())
+                return;
+
+            const {png, resizeScale} = this._prepareForOcr(capture);
+            const languages = normalizeLanguageSelection(
+                this._config.languages, await this._installedLanguages);
+
+            for (const pageMode of TESSERACT_PAGE_MODES) {
+                const result = await runCommand(
+                    ['tesseract', 'stdin', 'stdout', '-l', languages.join('+'),
+                        '--psm', pageMode, 'tsv'],
+                    {input: png, cancellable});
+
+                if (cancellable.is_cancelled())
+                    return;
+                if (!result.success)
+                    throw new Error(result.stderr.trim() || `tesseract exited with ${result.status}`);
+
+                this._words = parseTsv(result.stdout, {
+                    scale: ui._scale * resizeScale,
+                    offsetX: selection.x,
+                    offsetY: selection.y,
+                    minConfidence: this._config.confidence,
+                });
+                if (this._words.length > 0)
+                    break;
+            }
+            this._text = wordsToText(this._words);
+            this._selectionKey = key;
+            this.refreshSelection(ui);
+        } catch (e) {
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                throw e;
+        } finally {
+            if (this._cancellable === cancellable)
+                this._cancellable = null;
+        }
+    }
+
+    /** Shrink very large selections so Tesseract stays fast. */
+    _prepareForOcr({pixbuf, png}) {
+        const width = pixbuf.get_width();
+        const height = pixbuf.get_height();
+        const longEdge = Math.max(width, height);
+        if (longEdge <= this._config.maxEdge)
+            return {png, resizeScale: 1};
+
+        const resizeScale = this._config.maxEdge / longEdge;
+        const scaled = pixbuf.scale_simple(
+            Math.max(1, Math.round(width * resizeScale)),
+            Math.max(1, Math.round(height * resizeScale)),
+            GdkPixbuf.InterpType.BILINEAR);
+        const [, buffer] = scaled.save_to_bufferv('png', [], []);
+        return {png: buffer, resizeScale};
+    }
+
+    _ensureAttached(ui) {
         if (!this._overlay) {
             this._overlay = new OCRHighlightOverlay();
             this._overlay.add_constraint(new Clutter.BindConstraint({
                 source: global.stage,
                 coordinate: Clutter.BindCoordinate.ALL,
             }));
-            this._overlay.set_size(global.stage.width, global.stage.height);
             this._overlay.setStyle(this._style);
-
             ui._stageScreenshotContainer.insert_child_above(this._overlay, ui._stageScreenshot);
         }
 
-        if (!this._hitboxLayer) {
-            this._hitboxLayer = new St.Widget({
-                reactive: false,
-                x_expand: true,
-                y_expand: true,
-            });
-            this._hitboxLayer.add_constraint(new Clutter.BindConstraint({
+        if (!this._menuLayer) {
+            this._menuLayer = new St.Widget({reactive: false});
+            this._menuLayer.add_constraint(new Clutter.BindConstraint({
                 source: global.stage,
                 coordinate: Clutter.BindCoordinate.ALL,
             }));
 
-            this._copyMenu = new St.BoxLayout({
-                vertical: false,
+            this._menu = new St.BoxLayout({
+                style_class: 'ssv-text-menu',
                 visible: false,
                 reactive: true,
-                style: `
-                    background-color: rgba(34, 36, 40, 0.96);
-                    border: 1px solid rgba(255, 255, 255, 0.12);
-                    border-radius: 12px;
-                    padding: 8px 12px;
-                    spacing: 12px;
-                    color: #f3f4f6;
-                `,
             });
-            this._copyButton = new St.Button({
-                label: 'Copy',
-                can_focus: true,
-                y_align: Clutter.ActorAlign.CENTER,
-                style: `
-                    background-color: rgba(255,255,255,0.1);
-                    border-radius: 8px;
-                    padding: 6px 12px;
-                    font-weight: bold;
-                    color: white;
-                `,
-            });
-            this._copyButton.connect('clicked', () => {
-                this._copyActiveBoxText();
-            });
+            this._menu.add_child(this._makeMenuButton(_('Copy'), () => this._copyText()));
+            this._menu.add_child(this._makeMenuButton(_('Search'), () => this._searchText()));
+            this._menuLayer.add_child(this._menu);
 
-            this._searchButton = new St.Button({
-                label: 'Search',
-                can_focus: true,
-                y_align: Clutter.ActorAlign.CENTER,
-                style: `
-                    background-color: rgba(255,255,255,0.1);
-                    border-radius: 8px;
-                    padding: 6px 12px;
-                    font-weight: bold;
-                    color: white;
-                `,
-            });
-            this._searchButton.connect('clicked', () => {
-                this._searchActiveBoxText();
-            });
-
-            this._copyMenu.add_child(this._copyButton);
-            this._copyMenu.add_child(this._searchButton);
-            this._hitboxLayer.add_child(this._copyMenu);
-
-            ui.insert_child_above(this._hitboxLayer, ui._areaSelector);
+            ui.insert_child_above(this._menuLayer, ui._areaSelector);
         }
     }
 
-    async start(ui) {
-        this.ensureAttached(ui);
-        await this._runSelectionPass(ui);
+    _makeMenuButton(label, onClicked) {
+        const button = new St.Button({
+            label,
+            style_class: 'ssv-text-menu-button',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        button.connect('clicked', onClicked);
+        return button;
     }
 
-    async refineSelection(ui) {
-        await this._runSelectionPass(ui);
-    }
-
-    refreshSelection(ui) {
-        if (!this._overlay || !ui || !this._ocrConfig.enabled || !ui._selectionButton?.checked) {
-            if (this._overlay)
-                this._overlay.setBoxes([]);
-            this._rebuildHitboxes([], null);
-            return;
-        }
-
-        const selection = this._getSelectionGeometry(ui);
-        const selectionKey = this._makeSelectionKey(selection);
-        if (!selectionKey || selectionKey !== this._selectionKey) {
-            this._overlay.setBoxes([]);
-            this._rebuildHitboxes([], null);
-            return;
-        }
-
-        this._overlay.set_size(global.stage.width, global.stage.height);
-        this._overlay.setBoxes(this._selectionBoxes);
-        this._rebuildHitboxes(this._selectionBoxes, selection);
-    }
-
-    async _runSelectionPass(ui) {
-        if (!this._ocrConfig.enabled)
-            return;
-
-        if (!GLib.find_program_in_path('tesseract'))
-            return;
-
-        if (!ui?._selectionButton?.checked)
-            return;
-
-        const selection = this._getSelectionGeometry(ui);
-        const selectionKey = this._makeSelectionKey(selection);
-        if (!selectionKey)
-            return;
-
-        if (selectionKey === this._selectionKey && this._selectionBoxes.length > 0) {
-            this.refreshSelection(ui);
-            return;
-        }
-
-        this.reset();
-        const runId = this._runId;
-
-        let capture = null;
-
-        try {
-            capture = await this._captureSelectionScreenshot(ui);
-            if (!capture || runId !== this._runId)
-                return;
-
-            const tsv = await this._runTesseract(capture.path);
-            if (runId !== this._runId)
-                return;
-
-            this._selectionBoxes = this._parseTsv(
-                tsv,
-                capture.coordinateScale,
-                capture.offsetX,
-                capture.offsetY,
-                this._ocrConfig.confidence
-            );
-            this._selectionKey = selectionKey;
-            this.refreshSelection(ui);
-        } catch (e) {
-            if (runId === this._runId)
-                log('Shotzy OCR failed: ' + e.message);
-        } finally {
-            if (capture?.path)
-                this._deleteFile(capture.path);
-        }
-    }
-
-    _getSelectionGeometry(ui) {
-        if (!ui?._selectionButton?.checked)
+    _getSelection(ui) {
+        if (!isSelectionMode(ui))
             return null;
 
         const geometry = ui._getSelectedGeometry(false);
@@ -336,469 +321,153 @@ export class ScreenshotOCRController {
         return {x, y, width, height};
     }
 
-    async _captureSelectionScreenshot(ui) {
-        const scaledGeometry = ui._getSelectedGeometry(true);
-        const unscaledGeometry = ui._getSelectedGeometry(false);
-
-        if (!scaledGeometry || !unscaledGeometry || scaledGeometry[2] <= 0 || scaledGeometry[3] <= 0)
-            return null;
-
-        return this._captureTextureRegion(ui, {
-            scaledGeometry,
-            unscaledOrigin: {x: unscaledGeometry[0], y: unscaledGeometry[1]},
-            maxLongEdge: this._ocrConfig.maxEdge,
-        });
-    }
-
-    async _captureTextureRegion(ui, {scaledGeometry, unscaledOrigin, maxLongEdge}) {
-        const content = ui._stageScreenshot?.get_content();
-
-        if (!content)
-            throw new Error('Missing screenshot content');
-
-        const texture = content.get_texture();
-        if (!texture)
-            throw new Error('Missing screenshot texture');
-
-        const stream = Gio.MemoryOutputStream.new_resizable();
-        const [x, y, width, height] = scaledGeometry;
-
-        const pixbuf = await Shell.Screenshot.composite_to_stream(
-            texture,
-            x, y, width, height,
-            ui._scale,
-            null, 0, 0, 1,
-            stream
-        );
-        stream.close(null);
-
-        const path = GLib.build_filenamev([
-            GLib.get_tmp_dir(),
-            `shotzy_ocr_${Date.now()}_${GLib.uuid_string_random()}.png`,
-        ]);
-
-        const sourceWidth = pixbuf.get_width();
-        const sourceHeight = pixbuf.get_height();
-        const longEdge = Math.max(sourceWidth, sourceHeight);
-        const resizeScale = longEdge > maxLongEdge
-            ? maxLongEdge / longEdge
-            : 1;
-
-        let savedPixbuf = pixbuf;
-        if (resizeScale < 1) {
-            const scaledWidth = Math.max(1, Math.round(sourceWidth * resizeScale));
-            const scaledHeight = Math.max(1, Math.round(sourceHeight * resizeScale));
-            savedPixbuf = pixbuf.scale_simple(
-                scaledWidth,
-                scaledHeight,
-                GdkPixbuf.InterpType.BILINEAR
-            );
-        }
-
-        if (!savedPixbuf || !savedPixbuf.savev(path, 'png', [], []))
-            throw new Error('Failed to save OCR screenshot');
-
-        return {
-            path,
-            coordinateScale: ui._scale * resizeScale,
-            offsetX: unscaledOrigin.x,
-            offsetY: unscaledOrigin.y,
-            sourceWidth,
-            sourceHeight,
-            ocrWidth: savedPixbuf.get_width(),
-            ocrHeight: savedPixbuf.get_height(),
-            resizeScale,
-        };
-    }
-
-    async _runTesseract(imagePath) {
-        this._cancelActiveSubprocess();
-
-        const language = _buildTesseractLanguageArgument(this._ocrConfig.languages);
-        const argv = ['tesseract', imagePath, 'stdout', '-l', language, '--psm', '11', 'tsv'];
-        const subprocess = Gio.Subprocess.new(
-            argv,
-            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-        );
-        this._subprocess = subprocess;
-
-        let stdout;
-        let stderr;
-        try {
-            [, stdout, stderr] = await new Promise((resolve, reject) => {
-                subprocess.communicate_utf8_async(null, null, (_proc, res) => {
-                    try {
-                        resolve(subprocess.communicate_utf8_finish(res));
-                    } catch (e) {
-                        reject(e);
-                    }
-                });
-            });
-        } finally {
-            if (this._subprocess === subprocess)
-                this._subprocess = null;
-        }
-
-        if (!subprocess.get_successful()) {
-            const message = stderr?.trim() || `tesseract exited with ${subprocess.get_exit_status()}`;
-            throw new Error(message);
-        }
-
-        return stdout ?? '';
-    }
-
-    _parseTsv(tsv, scale, offsetX = 0, offsetY = 0, minConfidence = this._ocrConfig.confidence) {
-        const boxes = [];
-        const lines = tsv.split('\n');
-
-        for (let i = 1; i < lines.length; i++) {
-            const line = lines[i].trimEnd();
-            if (!line)
-                continue;
-
-            const columns = line.split('\t');
-            if (columns.length < 12)
-                continue;
-
-            const level = Number.parseInt(columns[0], 10);
-            const left = Number.parseInt(columns[6], 10);
-            const top = Number.parseInt(columns[7], 10);
-            const width = Number.parseInt(columns[8], 10);
-            const height = Number.parseInt(columns[9], 10);
-            const confidence = Number.parseFloat(columns[10]);
-            const text = columns.slice(11).join('\t').trim();
-
-            if (level !== 5 || !text || confidence < minConfidence)
-                continue;
-
-            boxes.push({
-                x: offsetX + left / scale,
-                y: offsetY + top / scale,
-                width: width / scale,
-                height: height / scale,
-                text,
-            });
-        }
-
-        return boxes;
-    }
-
-    _makeSelectionKey(selection) {
+    _makeKey(selection) {
         if (!selection)
             return null;
 
-        return [
-            Math.round(selection.x),
-            Math.round(selection.y),
-            Math.round(selection.width),
-            Math.round(selection.height),
-        ].join(':');
+        return [selection.x, selection.y, selection.width, selection.height]
+            .map(Math.round).join(':');
     }
 
-    _deleteFile(path) {
-        try {
-            GLib.unlink(path);
-        } catch (e) {
-            log(`Failed to delete OCR temp file ${path}: ${e.message}`);
+    _showMenu(selection) {
+        if (!this._menu || this._words.length === 0) {
+            this._hideMenu();
+            return;
         }
+
+        const [, menuWidth] = this._menu.get_preferred_width(-1);
+        const [, menuHeight] = this._menu.get_preferred_height(menuWidth);
+        const position = placeMenu(selection, {width: menuWidth, height: menuHeight},
+            getHudRect(), {width: global.stage.width, height: global.stage.height});
+
+        this._menu.set_position(position.x, position.y);
+        this._menu.show();
+        this._menuLayer.set_child_above_sibling(this._menu, null);
     }
 
-    _rebuildHitboxes(boxes, selection = null) {
-        if (!this._hitboxLayer)
+    _hideMenu() {
+        this._menu?.hide();
+    }
+
+    _copyText() {
+        if (!this._text)
             return;
 
-        this._hideCopyMenu();
-
-        if (boxes.length === 0 || !selection)
-            return;
-
-        let fullText = '';
-        let lastBox = null;
-        for (const box of boxes) {
-            if (lastBox) {
-                if (box.y - lastBox.y > lastBox.height * 0.5) {
-                    fullText += '\n';
-                } else {
-                    fullText += ' ';
-                }
-            }
-            fullText += box.text;
-            lastBox = box;
-        }
-        this._activeBoxText = fullText;
-
-        const [, naturalWidth] = this._copyMenu.get_preferred_width(-1);
-        const [, naturalHeight] = this._copyMenu.get_preferred_height(naturalWidth);
-
-        const menuWidth = naturalWidth || 200;
-        const menuHeight = naturalHeight || 44;
-
-        const margin = 12;
-        const stageWidth = global.stage.width;
-        const stageHeight = global.stage.height;
-
-        const centerX = selection.x + selection.width / 2;
-        const clampedCenterX = Math.max(
-            margin,
-            Math.min(stageWidth - menuWidth - margin, Math.round(centerX - menuWidth / 2))
-        );
-
-        const centerY = selection.y + selection.height / 2;
-        const clampedCenterY = Math.max(
-            margin,
-            Math.min(stageHeight - menuHeight - margin, Math.round(centerY - menuHeight / 2))
-        );
-
-        // Prefer below the selection, then above, then to either side, skipping
-        // any spot that runs off-screen or collides with the screenshot HUD.
-        const blocker = this._getHudRect(margin);
-        const candidates = [
-            {x: clampedCenterX, y: Math.round(selection.y + selection.height + margin)},
-            {x: clampedCenterX, y: Math.round(selection.y - menuHeight - margin)},
-            {x: Math.round(selection.x + selection.width + margin), y: clampedCenterY},
-            {x: Math.round(selection.x - menuWidth - margin), y: clampedCenterY},
-        ];
-
-        let placement = null;
-        for (const candidate of candidates) {
-            const rect = {x: candidate.x, y: candidate.y, width: menuWidth, height: menuHeight};
-            if (rect.x < margin || rect.y < margin ||
-                rect.x + menuWidth > stageWidth - margin ||
-                rect.y + menuHeight > stageHeight - margin)
-                continue;
-            if (blocker && _rectsOverlap(rect, blocker))
-                continue;
-            placement = candidate;
-            break;
-        }
-
-        if (!placement) {
-            // Nothing was fully clear; fall back to below/above on-screen.
-            const belowY = Math.round(selection.y + selection.height + margin);
-            const aboveY = Math.round(selection.y - menuHeight - margin);
-            const y = belowY + menuHeight <= stageHeight - margin
-                ? belowY
-                : Math.max(margin, aboveY);
-            placement = {x: clampedCenterX, y};
-        }
-
-        this._copyMenu.set_position(placement.x, placement.y);
-        this._copyMenu.visible = true;
-        this._hitboxLayer.set_child_above_sibling(this._copyMenu, null);
-    }
-
-    _getHudRect(inflate = 0) {
-        const panel = Main.screenshotUI?._panel;
-        if (!panel || !panel.visible)
-            return null;
-
-        const extents = panel.get_transformed_extents();
-        if (!extents)
-            return null;
-
-        return {
-            x: extents.get_x() - inflate,
-            y: extents.get_y() - inflate,
-            width: extents.get_width() + inflate * 2,
-            height: extents.get_height() + inflate * 2,
-        };
-    }
-
-    _hideCopyMenu() {
-        if (this._copyMenu)
-            this._copyMenu.visible = false;
-        this._activeBoxText = '';
-    }
-
-    _copyActiveBoxText() {
-        if (!this._activeBoxText)
-            return;
-
-        // Copy OCR text for immediate paste.
         const clipboard = St.Clipboard.get_default();
-        clipboard.set_text(St.ClipboardType.CLIPBOARD, this._activeBoxText);
-        clipboard.set_text(St.ClipboardType.PRIMARY, this._activeBoxText);
-        this._hideCopyMenu();
-        if (this._showMessage)
-            this._showMessage('copied OCR text');
-        else
-            Main.notify('Shotzy OCR', 'Copied OCR text');
+        clipboard.set_text(St.ClipboardType.CLIPBOARD, this._text);
+        clipboard.set_text(St.ClipboardType.PRIMARY, this._text);
+        this._showMessage(_('Text copied'));
 
-        if (this._ocrConfig.closeAfterCopy)
+        if (this._config.closeAfterCopy)
             Main.screenshotUI?.close();
     }
 
-    _searchActiveBoxText() {
-        if (!this._activeBoxText)
+    _searchText() {
+        if (!this._text)
             return;
 
-        const query = encodeURIComponent(this._activeBoxText);
-        let url;
-        
-        switch (this._ocrConfig.searchEngine) {
-        case 'bing':
-            url = `https://www.bing.com/search?q=${query}`;
-            break;
-        case 'duckduckgo':
-            url = `https://duckduckgo.com/?q=${query}`;
-            break;
-        case 'kagi':
-            url = `https://kagi.com/search?q=${query}`;
-            break;
-        case 'google':
-        default:
-            url = `https://www.google.com/search?q=${query}`;
-            break;
-        }
-        
         try {
-            Gio.app_info_launch_default_for_uri(url, null);
-            this._hideCopyMenu();
+            Gio.AppInfo.launch_default_for_uri(
+                buildSearchUrl(this._config.searchEngine, this._text), null);
             Main.screenshotUI?.close();
         } catch (e) {
-            log(`[Shotzy OCR] Failed to open search URL: ${e.message}`);
+            logError('Opening search failed', e);
+            this._showMessage(_('Could not open the browser'));
         }
-    }
-
-    _cancelActiveSubprocess() {
-        if (!this._subprocess)
-            return;
-
-        try {
-            this._subprocess.force_exit();
-        } catch (_e) {
-        }
-
-        this._subprocess = null;
     }
 
     _reloadSettings() {
-        if (!this._settings) {
-            this._style = DEFAULT_STYLE;
-            this._ocrConfig = DEFAULT_OCR;
-            return;
-        }
+        const s = this._settings;
 
         this._style = {
-            fill: _parseColorSetting(this._settings.get_string('highlight-fill-color'), DEFAULT_STYLE.fill),
-            border: _parseColorSetting(this._settings.get_string('highlight-border-color'), DEFAULT_STYLE.border),
-            shadowOpacity: _clamp(this._settings.get_double('highlight-shadow-opacity'), 0, 0.75),
-            glow: DEFAULT_STYLE.glow,
-            radius: _clamp(this._settings.get_int('highlight-radius'), 0, 24),
-            padding: _clamp(this._settings.get_int('highlight-padding'), 0, 24),
-            borderWidth: _clamp(this._settings.get_double('highlight-border-width'), 0.5, 8),
+            ...DEFAULT_STYLE,
+            fill: parseRgbaSetting(s.get_string('highlight-fill-color'), DEFAULT_STYLE.fill),
+            border: parseRgbaSetting(s.get_string('highlight-border-color'), DEFAULT_STYLE.border),
+            shadowOpacity: clamp(s.get_double('highlight-shadow-opacity'), 0, 0.75),
+            radius: clamp(s.get_int('highlight-radius'), 0, 24),
+            padding: clamp(s.get_int('highlight-padding'), 0, 24),
+            borderWidth: clamp(s.get_double('highlight-border-width'), 0.5, 8),
         };
 
-        this._ocrConfig = {
-            enabled: this._settings.get_boolean('ocr-enabled'),
-            confidence: _clamp(this._settings.get_int('selection-confidence'), 0, 99),
-            maxEdge: _clamp(this._settings.get_int('selection-max-edge'), 800, 4096),
-            languages: _normalizeLanguageSelection(this._settings.get_strv('ocr-languages')),
-            searchEngine: this._settings.get_string('search-engine') || 'google',
-            closeAfterCopy: this._settings.get_boolean('close-after-copy'),
+        this._config = {
+            enabled: s.get_boolean('ocr-enabled'),
+            confidence: clamp(s.get_int('selection-confidence'), 0, 99),
+            maxEdge: clamp(s.get_int('selection-max-edge'), 800, 4096),
+            languages: s.get_strv('ocr-languages'),
+            searchEngine: s.get_string('search-engine'),
+            closeAfterCopy: s.get_boolean('close-after-copy'),
         };
     }
 }
 
-function _rectsOverlap(a, b) {
+/**
+ * Pick a spot for the Copy/Search menu: below the selection, then above, then
+ * either side, skipping spots that leave the screen or cover the screenshot
+ * toolbar.
+ */
+function placeMenu(selection, menu, blocker, stage) {
+    const margin = 12;
+    const fitX = x => clamp(Math.round(x), margin, stage.width - menu.width - margin);
+    const fitY = y => clamp(Math.round(y), margin, stage.height - menu.height - margin);
+
+    const centerX = fitX(selection.x + (selection.width - menu.width) / 2);
+    const centerY = fitY(selection.y + (selection.height - menu.height) / 2);
+    const below = Math.round(selection.y + selection.height + margin);
+    const above = Math.round(selection.y - menu.height - margin);
+
+    const candidates = [
+        {x: centerX, y: below},
+        {x: centerX, y: above},
+        {x: Math.round(selection.x + selection.width + margin), y: centerY},
+        {x: Math.round(selection.x - menu.width - margin), y: centerY},
+    ];
+
+    const inflated = blocker && {
+        x: blocker.x - margin,
+        y: blocker.y - margin,
+        width: blocker.width + margin * 2,
+        height: blocker.height + margin * 2,
+    };
+
+    for (const {x, y} of candidates) {
+        const rect = {x, y, width: menu.width, height: menu.height};
+        const onScreen = x >= margin && y >= margin &&
+            x + menu.width <= stage.width - margin &&
+            y + menu.height <= stage.height - margin;
+        if (onScreen && !(inflated && rectsOverlap(rect, inflated)))
+            return {x, y};
+    }
+
+    // Nothing is fully clear; stay on screen below or above the selection.
+    return {x: centerX, y: below + menu.height <= stage.height - margin ? below : fitY(above)};
+}
+
+function getHudRect() {
+    const panel = Main.screenshotUI?._panel;
+    if (!panel?.visible)
+        return null;
+
+    const extents = panel.get_transformed_extents();
+    return {
+        x: extents.get_x(),
+        y: extents.get_y(),
+        width: extents.get_width(),
+        height: extents.get_height(),
+    };
+}
+
+function rectsOverlap(a, b) {
     return a.x < b.x + b.width &&
         a.x + a.width > b.x &&
         a.y < b.y + b.height &&
         a.y + a.height > b.y;
 }
 
-function _roundedRect(cr, x, y, width, height, radius) {
+function roundedRect(cr, x, y, width, height, radius) {
     cr.newSubPath();
     cr.arc(x + width - radius, y + radius, radius, -Math.PI / 2, 0);
     cr.arc(x + width - radius, y + height - radius, radius, 0, Math.PI / 2);
     cr.arc(x + radius, y + height - radius, radius, Math.PI / 2, Math.PI);
     cr.arc(x + radius, y + radius, radius, Math.PI, Math.PI * 3 / 2);
     cr.closePath();
-}
-
-function _parseColorSetting(value, fallback) {
-    const parts = value.split(',').map(Number.parseFloat);
-    if (parts.length !== 4 || !parts.every(Number.isFinite))
-        return fallback;
-
-    return [
-        _clamp(parts[0], 0, 1),
-        _clamp(parts[1], 0, 1),
-        _clamp(parts[2], 0, 1),
-        _clamp(parts[3], 0, 1),
-    ];
-}
-
-function _buildTesseractLanguageArgument(languages) {
-    return _normalizeLanguageSelection(languages, _listInstalledTesseractLanguages()).join('+');
-}
-
-function _listInstalledTesseractLanguages() {
-    const directory = Gio.File.new_for_path(TESSDATA_DIR);
-    const languages = [];
-    let enumerator = null;
-
-    try {
-        enumerator = directory.enumerate_children(
-            'standard::name,standard::type',
-            Gio.FileQueryInfoFlags.NONE,
-            null
-        );
-
-        let info;
-        while ((info = enumerator.next_file(null)) !== null) {
-            if (info.get_file_type() !== Gio.FileType.REGULAR)
-                continue;
-
-            const name = info.get_name();
-            if (!name.endsWith('.traineddata'))
-                continue;
-
-            const code = name.slice(0, -'.traineddata'.length);
-            if (/^[A-Za-z0-9_]+$/.test(code))
-                languages.push(code);
-        }
-    } catch (_e) {
-    } finally {
-        try {
-            enumerator?.close(null);
-        } catch (_e) {
-        }
-    }
-
-    return languages.sort();
-}
-
-function _normalizeLanguageSelection(languages, installedLanguages = null) {
-    const installed = installedLanguages?.length > 0 ? new Set(installedLanguages) : null;
-    const normalized = [];
-    const seen = new Set();
-
-    if (!Array.isArray(languages))
-        languages = [];
-
-    for (const language of languages) {
-        const code = String(language).trim();
-        if (!code || !/^[A-Za-z0-9_]+$/.test(code) || seen.has(code))
-            continue;
-
-        if (installed && !installed.has(code))
-            continue;
-
-        normalized.push(code);
-        seen.add(code);
-    }
-
-    if (normalized.length > 0)
-        return normalized;
-
-    const fallback = DEFAULT_OCR.languages.find(language => !installed || installed.has(language));
-    if (fallback)
-        return [fallback];
-
-    return installedLanguages?.length > 0 ? [installedLanguages[0]] : [...DEFAULT_OCR.languages];
-}
-
-function _clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
 }

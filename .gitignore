@@ -1,1 +1,4 @@
-google-lens-search@SamkitJain660.github.io.shell-extension.zip
+# Build output
+*.shell-extension.zip
+schemas/gschemas.compiled
+build/

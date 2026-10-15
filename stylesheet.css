@@ -1,0 +1,51 @@
+/* GNOME Shell loads this automatically for the extension. St widgets support
+   a subset of CSS; see DEVELOPING.md for how to iterate on it. */
+
+.ssv-lens-button {
+    margin-left: 10px;
+}
+
+.ssv-qr-button {
+    margin-top: 10px;
+}
+
+.ssv-side-box {
+    margin-left: 16px;
+    padding-left: 16px;
+    border-left: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.ssv-toast {
+    background-color: rgba(28, 30, 34, 0.96);
+    color: white;
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font-weight: 600;
+}
+
+.ssv-text-menu {
+    background-color: rgba(34, 36, 40, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    padding: 8px 12px;
+    spacing: 12px;
+    color: #f3f4f6;
+}
+
+.ssv-text-menu-button {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-weight: bold;
+    color: white;
+}
+
+.ssv-text-menu-button:hover,
+.ssv-text-menu-button:focus {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+.ssv-text-menu-button:active {
+    background-color: rgba(255, 255, 255, 0.28);
+}
