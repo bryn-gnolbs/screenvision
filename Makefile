@@ -55,7 +55,7 @@ logs:
 
 # GNOME 49+ runs a nested shell through the Mutter development kit window.
 nested: install
-	MUTTER_DEBUG_DUMMY_MODE_SPECS=1600x900 dbus-run-session gnome-shell --devkit --wayland
+	scripts/nested.sh
 
 clean:
 	rm -rf build

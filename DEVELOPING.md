@@ -91,7 +91,10 @@ sudo apt install mutter-dev-bin   # once, provides the devkit viewer
 make nested
 ```
 
-In the nested shell press Print Screen to open the screenshot tool. Settings and enabled
+In the nested shell press Print Screen to open the screenshot tool. The terminal shows only
+ScreenVision messages and JavaScript errors; the full log is in `build/nested.log`. Errors
+from your other installed extensions show up there too, since the nested shell loads them.
+After a code change, close the window and run `make nested` again; no re-login needed. Settings and enabled
 extensions are shared with your real session. If you also have the original Shotzy
 installed, disable one of them so both don't add buttons.
 
