@@ -34,8 +34,10 @@ const CHIP_SPACING = 8;
 // same name make the second one fail to load. This line differs per copy.
 const TYPE_NAME = 'ScreenVisionAgentBubble';
 
-export const AgentBubble = GObject.registerClass({GTypeName: TYPE_NAME},
+export const AgentBubble = GObject.registerClass(
 class AgentBubble extends St.BoxLayout {
+    static [GObject.GTypeName] = TYPE_NAME;
+
     _init() {
         super._init({
             style_class: 'sv-bubble',
