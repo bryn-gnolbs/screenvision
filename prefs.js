@@ -1,444 +1,418 @@
+// Preferences window (opened from the Extensions app). This runs in its own
+// GTK 4 / libadwaita process, not inside GNOME Shell.
+
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
-import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+import {
+    ExtensionPreferences, gettext as _,
+} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-const COLOR_KEYS = {
-    'highlight-fill-color': 'Fill color',
-    'highlight-border-color': 'Border color',
-};
+import {
+    SEARCH_ENGINES, formatRgbaSetting, hasProgram, parseRgbaSetting,
+} from './lib/common.js';
+import {listTesseractLanguages, normalizeLanguageSelection} from './lib/vision/tesseract.js';
+import {MemoryStore} from './lib/memory.js';
+import {interpretKeyPress} from './lib/shortcutKeys.js';
 
-const DEFAULTS = {
-    'highlight-fill-color': '0.10,0.11,0.13,0.34',
-    'highlight-border-color': '0.92,0.94,0.97,0.34',
-};
-
-const TESSDATA_DIR = GLib.getenv('TESSDATA_PREFIX') || '/usr/share/tessdata';
-const DEFAULT_OCR_LANGUAGES = ['eng'];
-const HIDDEN_TESSERACT_LANGUAGES = new Set(['osd']);
-export default class ShotzyPreferences extends ExtensionPreferences {
-    fillPreferencesWindow(window) {
+export default class ScreenVisionPreferences extends ExtensionPreferences {
+    async fillPreferencesWindow(window) {
         const settings = this.getSettings();
-        const dependencyState = this._getDependencyState();
-        const tesseractLanguages = _listInstalledTesseractLanguages();
+        const languages = await listTesseractLanguages();
 
         window.set_default_size(720, 640);
+        window.add(this._buildGeneralPage(settings, window));
+        window.add(this._buildAppearancePage(settings));
+        window.add(this._buildOcrPage(settings, languages));
+        window.add(this._buildSearchPage(settings));
+    }
 
-        const stylePage = new Adw.PreferencesPage({
-            title: 'Highlighting',
-            icon_name: 'preferences-desktop-theme-symbolic',
+    _buildGeneralPage(settings, window) {
+        const page = new Adw.PreferencesPage({
+            title: _('General'),
+            icon_name: 'preferences-system-symbolic',
         });
-        window.add(stylePage);
 
-        const dependencyRow = this._createDependencyRow(dependencyState);
-        if (dependencyRow) {
-            const dependencyGroup = new Adw.PreferencesGroup();
-            dependencyGroup.add(dependencyRow);
-            stylePage.add(dependencyGroup);
+        const missingRow = this._buildMissingToolsRow();
+        if (missingRow) {
+            const group = new Adw.PreferencesGroup();
+            group.add(missingRow);
+            page.add(group);
         }
 
-        const styleGroup = new Adw.PreferencesGroup({
-            title: 'Appearance',
-            description: 'Controls for OCR highlight styling in the screenshot UI.',
+        const shortcutGroup = new Adw.PreferencesGroup({
+            title: _('Keyboard Shortcut'),
+            description: _('Print Screen always opens the screenshot tool as well; ' +
+                'change that in Settings › Keyboard › Keyboard Shortcuts.'),
         });
-        stylePage.add(styleGroup);
+        shortcutGroup.add(this._shortcutRow(settings, 'screenshot-shortcut', window, {
+            title: _('Open screenshot tool'),
+            defaultLabel: _('Print Screen'),
+        }));
+        page.add(shortcutGroup);
 
-        for (const [key, title] of Object.entries(COLOR_KEYS))
-            styleGroup.add(this._createColorRow(settings, key, title));
+        const memoryGroup = new Adw.PreferencesGroup({
+            title: _('Memory'),
+            description: _('Press Enter in the screenshot tool to keep what you selected. ' +
+                'The image goes to Pictures/Screenshots; the text, links and codes go to a ' +
+                'private log on this computer that the assistant will learn from.'),
+        });
+        memoryGroup.add(this._switchRow(settings, 'remember-enabled', {
+            title: _('Remember with Enter'),
+            subtitle: _('Add what you keep to the memory log. When off, Enter only saves the image.'),
+        }));
+        memoryGroup.add(this._forgetRow(window));
+        page.add(memoryGroup);
 
-        styleGroup.add(this._createSpinRow(settings, {
-            key: 'highlight-padding',
-            title: 'Box padding',
-            subtitle: 'Extra room around each detected text box.',
-            min: 0,
-            max: 16,
-            step: 1,
+        return page;
+    }
+
+    _buildAppearancePage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Highlighting'),
+            icon_name: 'preferences-desktop-theme-symbolic',
+        });
+
+        const group = new Adw.PreferencesGroup({
+            title: _('Appearance'),
+            description: _('How recognised text is highlighted in the screenshot tool.'),
+        });
+        page.add(group);
+
+        group.add(this._colorRow(settings, 'highlight-fill-color', _('Fill color')));
+        group.add(this._colorRow(settings, 'highlight-border-color', _('Border color')));
+        group.add(this._spinRow(settings, 'highlight-padding', {
+            title: _('Box padding'),
+            subtitle: _('Extra room around each detected word.'),
+            min: 0, max: 16, step: 1,
         }));
-        styleGroup.add(this._createSpinRow(settings, {
-            key: 'highlight-radius',
-            title: 'Corner radius',
-            subtitle: 'Roundedness of the highlight shape.',
-            min: 0,
-            max: 24,
-            step: 1,
+        group.add(this._spinRow(settings, 'highlight-radius', {
+            title: _('Corner radius'),
+            subtitle: _('Roundedness of the highlight shape.'),
+            min: 0, max: 24, step: 1,
         }));
-        styleGroup.add(this._createSpinRow(settings, {
-            key: 'highlight-border-width',
-            title: 'Border width',
-            subtitle: 'Outline thickness of each highlight box.',
-            min: 0.5,
-            max: 4,
-            step: 0.25,
-            digits: 2,
-            isDouble: true,
+        group.add(this._spinRow(settings, 'highlight-border-width', {
+            title: _('Border width'),
+            subtitle: _('Outline thickness of each highlight box.'),
+            min: 0.5, max: 4, step: 0.25, digits: 2,
         }));
-        styleGroup.add(this._createSpinRow(settings, {
-            key: 'highlight-shadow-opacity',
-            title: 'Shadow opacity',
-            subtitle: 'Depth under the highlight boxes.',
-            min: 0,
-            max: 0.5,
-            step: 0.01,
-            digits: 2,
-            isDouble: true,
+        group.add(this._spinRow(settings, 'highlight-shadow-opacity', {
+            title: _('Shadow opacity'),
+            subtitle: _('Depth under the highlight boxes.'),
+            min: 0, max: 0.5, step: 0.01, digits: 2,
         }));
 
-        const ocrPage = new Adw.PreferencesPage({
-            title: 'OCR',
+        return page;
+    }
+
+    _buildOcrPage(settings, languages) {
+        const page = new Adw.PreferencesPage({
+            title: _('Text Recognition'),
             icon_name: 'accessories-text-editor-symbolic',
         });
-        window.add(ocrPage);
 
-        const ocrGroup = new Adw.PreferencesGroup({
-            title: 'Recognition',
-            description: 'Controls for the single selected-area OCR pass.',
+        const group = new Adw.PreferencesGroup({
+            title: _('Recognition'),
+            description: _('Text recognition runs on the selected area using Tesseract.'),
         });
-        ocrPage.add(ocrGroup);
+        page.add(group);
 
-        const enabledRow = new Adw.SwitchRow({
-            title: 'Enable OCR highlighting',
-            subtitle: 'Run OCR on the active screenshot selection and draw text highlights.',
-        });
-        settings.bind('ocr-enabled', enabledRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        ocrGroup.add(enabledRow);
-
-        ocrGroup.add(this._createSpinRow(settings, {
-            key: 'selection-confidence',
-            title: 'OCR confidence',
-            subtitle: 'Lower values catch more text but increase false positives.',
-            min: 0,
-            max: 95,
-            step: 1,
+        group.add(this._switchRow(settings, 'ocr-enabled', {
+            title: _('Recognise text'),
+            subtitle: _('Highlight text in the selected area and offer Copy and Search.'),
         }));
-        ocrGroup.add(this._createSpinRow(settings, {
-            key: 'selection-max-edge',
-            title: 'OCR max edge',
-            subtitle: 'Higher values improve selected-area accuracy but cost more CPU.',
-            min: 1000,
-            max: 4000,
-            step: 100,
+        group.add(this._switchRow(settings, 'read-whole-screen', {
+            title: _('Live selection'),
+            subtitle: _('Read the whole screen when the tool opens so text and suggestions update ' +
+                'while you drag. Runs entirely on this computer.'),
         }));
-        ocrGroup.add(this._createLanguageRow(settings, tesseractLanguages));
+        group.add(this._spinRow(settings, 'selection-confidence', {
+            title: _('Minimum confidence'),
+            subtitle: _('Lower values catch more text but add false positives.'),
+            min: 0, max: 95, step: 1,
+        }));
+        group.add(this._spinRow(settings, 'selection-max-edge', {
+            title: _('Maximum image size'),
+            subtitle: _('Larger selections are scaled down to this many pixels. Higher is more accurate but slower.'),
+            min: 1000, max: 4000, step: 100,
+        }));
+        group.add(this._languageRow(settings, languages));
+        group.add(this._switchRow(settings, 'close-after-copy', {
+            title: _('Close after copying'),
+            subtitle: _('Close the screenshot tool once text is copied.'),
+        }));
 
-        const closeAfterCopyRow = new Adw.SwitchRow({
-            title: 'Close after copying',
-            subtitle: 'Close the screenshot tool automatically once OCR text is copied.',
-        });
-        settings.bind('close-after-copy', closeAfterCopyRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        ocrGroup.add(closeAfterCopyRow);
+        return page;
+    }
 
-        const searchPage = new Adw.PreferencesPage({
-            title: 'Search',
+    _buildSearchPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Search'),
             icon_name: 'system-search-symbolic',
         });
-        window.add(searchPage);
 
-        const searchGroup = new Adw.PreferencesGroup({
-            title: 'Search Settings',
-            description: 'Configure how search results are handled.',
+        const searchGroup = new Adw.PreferencesGroup({title: _('Text Search')});
+        page.add(searchGroup);
+
+        const engineRow = new Adw.ComboRow({
+            title: _('Search engine'),
+            subtitle: _('Used by the Search button for recognised text.'),
+            model: Gtk.StringList.new(SEARCH_ENGINES.map(engine => engine.name)),
         });
-        searchPage.add(searchGroup);
-
-        const searchEngineRow = new Adw.ComboRow({
-            title: 'Search Engine',
-            subtitle: 'Preferred engine for looking up OCR text.',
-            model: new Gtk.StringList({
-                strings: ['Google', 'Bing', 'DuckDuckGo', 'Kagi'],
-            }),
-        });
-
-        const engines = ['google', 'bing', 'duckduckgo', 'kagi'];
-        const currentEngine = settings.get_string('search-engine');
-        searchEngineRow.selected = Math.max(0, engines.indexOf(currentEngine));
-
-        searchEngineRow.connect('notify::selected', () => {
-            settings.set_string('search-engine', engines[searchEngineRow.selected]);
-        });
-
-        searchGroup.add(searchEngineRow);
-
-        const actionsGroup = new Adw.PreferencesGroup({
-            title: 'Screenshot Actions',
-            description: 'Choose which extra buttons appear in the screenshot UI.',
-        });
-        searchPage.add(actionsGroup);
-
-        const lensButtonRow = new Adw.SwitchRow({
-            title: 'Show Google Lens button',
-            subtitle: 'Display the Google Lens upload button beside the screenshot controls.',
-        });
-        settings.bind('show-google-lens-button', lensButtonRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        actionsGroup.add(lensButtonRow);
-
-        const qrButtonRow = new Adw.SwitchRow({
-            title: 'Show QR code button',
-            subtitle: 'Display the QR scanning button in the screenshot controls.',
-        });
-        settings.bind('show-qr-button', qrButtonRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        actionsGroup.add(qrButtonRow);
-
-        window._settings = settings;
-    }
-
-    _getDependencyState() {
-        const dependencies = [
-            {
-                program: 'tesseract',
-            },
-            {
-                program: 'zbarimg',
-            },
-        ].map(item => ({
-            ...item,
-            available: Boolean(GLib.find_program_in_path(item.program)),
-        }));
-
-        return {
-            dependencies,
-            missing: dependencies.filter(item => !item.available),
+        const syncEngine = () => {
+            const index = SEARCH_ENGINES.findIndex(e => e.id === settings.get_string('search-engine'));
+            engineRow.selected = Math.max(0, index);
         };
+        syncEngine();
+        settings.connect('changed::search-engine', syncEngine);
+        engineRow.connect('notify::selected', () => {
+            settings.set_string('search-engine', SEARCH_ENGINES[engineRow.selected].id);
+        });
+        searchGroup.add(engineRow);
+
+        return page;
     }
 
-    _createDependencyRow({dependencies, missing}) {
+    _buildMissingToolsRow() {
+        const missing = [
+            {program: 'tesseract', feature: _('text recognition')},
+            {program: 'zbarimg', feature: _('QR scanning')},
+        ].filter(tool => !hasProgram(tool.program));
+
         if (missing.length === 0)
             return null;
 
-        const missingFeatures = [];
-        if (missing.some(item => item.program === 'tesseract'))
-            missingFeatures.push('OCR highlighting');
-        if (missing.some(item => item.program === 'zbarimg'))
-            missingFeatures.push('QR scanning');
-
-        const tooltipLines = [
-            'Runtime Dependencies',
-            ...dependencies.map(item => `${item.program}: ${item.available ? 'Available' : 'Missing'}`),
-        ];
-
         const row = new Adw.ActionRow({
-            title: `Optional tool missing: ${missing.map(item => item.program).join(', ')}`,
-            subtitle: `Install to enable ${missingFeatures.join(' and ')}.`,
-            tooltip_text: tooltipLines.join('\n'),
+            title: _('Missing optional tools: %s').format(missing.map(t => t.program).join(', ')),
+            subtitle: _('Install them to enable %s. See the README for package names.')
+                .format(missing.map(t => t.feature).join(_(' and '))),
         });
-        row.add_prefix(new Gtk.Image({
-            icon_name: 'dialog-warning-symbolic',
-            valign: Gtk.Align.CENTER,
-        }));
-
-        row.add_suffix(new Gtk.Image({
-            icon_name: 'help-about-symbolic',
-            tooltip_text: tooltipLines.join('\n'),
-            valign: Gtk.Align.CENTER,
-        }));
-
+        row.add_prefix(new Gtk.Image({icon_name: 'dialog-warning-symbolic'}));
         return row;
     }
 
-    _createLanguageRow(settings, installedLanguages) {
-        if (installedLanguages.length === 0) {
+    _languageRow(settings, installed) {
+        if (installed.length === 0) {
             const row = new Adw.ActionRow({
-                title: 'OCR languages',
-                subtitle: `No Tesseract language data found in ${TESSDATA_DIR}.`,
+                title: _('Languages'),
+                subtitle: _('Tesseract reports no installed languages.'),
             });
-            row.add_prefix(new Gtk.Image({
-                icon_name: 'dialog-warning-symbolic',
-                valign: Gtk.Align.CENTER,
-            }));
+            row.add_prefix(new Gtk.Image({icon_name: 'dialog-warning-symbolic'}));
             return row;
         }
 
         const row = new Adw.ExpanderRow({
-            title: 'OCR languages',
+            title: _('Languages'),
+            subtitle: _('Selecting fewer languages is faster and more accurate.'),
         });
-
+        const selected = () => normalizeLanguageSelection(settings.get_strv('ocr-languages'), installed);
         const switches = new Map();
-        const updateRows = () => {
-            const selected = new Set(_normalizeLanguageSelection(settings.get_strv('ocr-languages'), installedLanguages));
 
-            for (const [code, switchRow] of switches)
-                switchRow.active = selected.has(code);
-        };
-
-        for (const language of installedLanguages) {
-            const switchRow = new Adw.SwitchRow({
-                title: language,
-            });
-            switchRow.active = _normalizeLanguageSelection(
-                settings.get_strv('ocr-languages'),
-                installedLanguages
-            ).includes(language);
-
+        for (const code of installed) {
+            const switchRow = new Adw.SwitchRow({title: code});
             switchRow.connect('notify::active', () => {
-                const selected = new Set(_normalizeLanguageSelection(settings.get_strv('ocr-languages'), installedLanguages));
+                const current = new Set(selected());
                 if (switchRow.active)
-                    selected.add(language);
+                    current.add(code);
                 else
-                    selected.delete(language);
-
-                settings.set_strv('ocr-languages', _normalizeLanguageSelection([...selected], installedLanguages));
+                    current.delete(code);
+                settings.set_strv('ocr-languages', normalizeLanguageSelection([...current], installed));
             });
-
-            switches.set(language, switchRow);
+            switches.set(code, switchRow);
             row.add_row(switchRow);
         }
 
-        settings.connect('changed::ocr-languages', updateRows);
-        updateRows();
+        // Also fixes up a switch that was turned off when it was the last
+        // language: the normalized selection turns it back on.
+        const sync = () => {
+            const active = new Set(selected());
+            for (const [code, switchRow] of switches)
+                switchRow.active = active.has(code);
+        };
+        sync();
+        settings.connect('changed::ocr-languages', sync);
         return row;
     }
 
-    _createColorRow(settings, key, title) {
-        const row = new Adw.ActionRow({
-            title,
-            subtitle: 'Alpha is supported. Changes apply immediately.',
-        });
-
-        const button = new Gtk.ColorButton({
-            use_alpha: true,
-            rgba: _rgbaFromSetting(settings.get_string(key), DEFAULTS[key]),
+    /**
+     * A row showing a keyboard shortcut. Clicking it opens a dialog that
+     * records the next key combination.
+     */
+    _shortcutRow(settings, key, window, {title, defaultLabel}) {
+        const label = new Gtk.ShortcutLabel({
+            disabled_text: _('Disabled'),
             valign: Gtk.Align.CENTER,
         });
-        button.connect('notify::rgba', () => {
-            settings.set_string(key, _rgbaToSetting(button.get_rgba()));
-        });
-
         const reset = new Gtk.Button({
             icon_name: 'edit-undo-symbolic',
-            tooltip_text: 'Reset to default',
+            tooltip_text: _('Reset to %s').format(defaultLabel),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        const row = new Adw.ActionRow({
+            title,
+            subtitle: _('Click to change'),
+            activatable: true,
+        });
+        row.add_suffix(reset);
+        row.add_suffix(label);
+
+        const sync = () => {
+            label.accelerator = settings.get_strv(key)[0] ?? '';
+            reset.sensitive = settings.get_user_value(key) !== null;
+        };
+        sync();
+        settings.connect(`changed::${key}`, sync);
+
+        reset.connect('clicked', () => settings.reset(key));
+        row.connect('activated', () => {
+            this._recordShortcut(window, title, accelerator => {
+                settings.set_strv(key, accelerator ? [accelerator] : []);
+            });
+        });
+        return row;
+    }
+
+    /**
+     * Ask for a key combination. Calls onDone(accelerator) with a GTK
+     * accelerator string, or with '' when the user disables the shortcut.
+     */
+    _recordShortcut(window, title, onDone) {
+        const status = new Adw.StatusPage({
+            icon_name: 'preferences-desktop-keyboard-shortcuts-symbolic',
+            title: _('Press a key combination'),
+            description: _('Esc to cancel · Backspace to disable'),
+        });
+        const toolbar = new Adw.ToolbarView({content: status});
+        toolbar.add_top_bar(new Adw.HeaderBar());
+        const dialog = new Adw.Dialog({
+            title,
+            child: toolbar,
+            content_width: 440,
+        });
+
+        const keys = new Gtk.EventControllerKey({propagation_phase: Gtk.PropagationPhase.CAPTURE});
+        keys.connect('key-pressed', (_controller, keyval, keycode, state) => {
+            const result = interpretKeyPress(keyval, keycode, state);
+            switch (result.action) {
+            case 'wait':
+                break;
+            case 'reject':
+                status.description = result.reason === 'needs-modifier'
+                    ? _('Add Ctrl, Alt or Super so the shortcut does not fire while typing')
+                    : _('That key cannot be used as a shortcut');
+                break;
+            case 'cancel':
+                dialog.close();
+                break;
+            default:
+                onDone(result.accelerator ?? '');
+                dialog.close();
+            }
+            return Gdk.EVENT_STOP;
+        });
+        dialog.add_controller(keys);
+
+        // GNOME grabs keys like Print Screen and Super+S before any window sees
+        // them. Pause those grabs while recording, as GNOME Settings does.
+        const toplevel = window.get_surface();
+        dialog.connect('closed', () => toplevel?.restore_system_shortcuts());
+        dialog.present(window);
+        toplevel?.inhibit_system_shortcuts(null);
+    }
+
+    /** "Forget all" with a confirmation, since it cannot be undone. */
+    _forgetRow(window) {
+        const store = new MemoryStore();
+        const row = new Adw.ActionRow({
+            title: _('Forget everything'),
+            subtitle: _('Delete the memory log. Saved screenshots stay in your Pictures folder.'),
+        });
+        const button = new Gtk.Button({
+            label: _('Forget All'),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
+        });
+        button.connect('clicked', () => {
+            const dialog = new Adw.AlertDialog({
+                heading: _('Forget everything?'),
+                body: _('All remembered text, links and codes will be deleted. This cannot be undone.'),
+            });
+            dialog.add_response('cancel', _('Cancel'));
+            dialog.add_response('forget', _('Forget All'));
+            dialog.set_response_appearance('forget', Adw.ResponseAppearance.DESTRUCTIVE);
+            dialog.set_default_response('cancel');
+            dialog.connect('response', (_dialog, response) => {
+                if (response !== 'forget')
+                    return;
+                store.forgetAll();
+                window.add_toast(new Adw.Toast({title: _('Memories forgotten')}));
+            });
+            dialog.present(window);
+        });
+        row.add_suffix(button);
+        return row;
+    }
+
+    _switchRow(settings, key, {title, subtitle}) {
+        const row = new Adw.SwitchRow({title, subtitle});
+        settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+        return row;
+    }
+
+    _spinRow(settings, key, {title, subtitle, min, max, step, digits = 0}) {
+        const row = new Adw.SpinRow({
+            title,
+            subtitle,
+            digits,
+            adjustment: new Gtk.Adjustment({
+                lower: min,
+                upper: max,
+                step_increment: step,
+                page_increment: step * 10,
+            }),
+        });
+        // GSettings converts between integer keys and the double 'value'.
+        settings.bind(key, row.adjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+        return row;
+    }
+
+    _colorRow(settings, key, title) {
+        const row = new Adw.ActionRow({title});
+        const button = new Gtk.ColorDialogButton({
+            dialog: new Gtk.ColorDialog({with_alpha: true}),
             valign: Gtk.Align.CENTER,
         });
-        reset.connect('clicked', () => {
-            settings.reset(key);
-            button.set_rgba(_rgbaFromSetting(settings.get_string(key), DEFAULTS[key]));
+        const reset = new Gtk.Button({
+            icon_name: 'edit-undo-symbolic',
+            tooltip_text: _('Reset to default'),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
         });
+
+        const defaultValue = settings.get_default_value(key).deep_unpack();
+        const fromSettings = () => {
+            const [red, green, blue, alpha] = parseRgbaSetting(
+                settings.get_string(key), parseRgbaSetting(defaultValue, [0, 0, 0, 1]));
+            const rgba = new Gdk.RGBA({red, green, blue, alpha});
+            if (!rgba.equal(button.rgba))
+                button.rgba = rgba;
+        };
+        fromSettings();
+        settings.connect(`changed::${key}`, fromSettings);
+
+        button.connect('notify::rgba', () => {
+            const {red, green, blue, alpha} = button.rgba;
+            settings.set_string(key, formatRgbaSetting([red, green, blue, alpha]));
+        });
+        reset.connect('clicked', () => settings.reset(key));
 
         row.add_suffix(reset);
         row.add_suffix(button);
         row.activatable_widget = button;
         return row;
     }
-
-    _createSpinRow(settings, {
-        key,
-        title,
-        subtitle,
-        min,
-        max,
-        step,
-        digits = 0,
-        isDouble = false,
-    }) {
-        const row = new Adw.SpinRow({
-            title,
-            subtitle,
-            adjustment: new Gtk.Adjustment({
-                lower: min,
-                upper: max,
-                step_increment: step,
-                page_increment: step,
-            }),
-            digits,
-        });
-
-        row.set_value(isDouble ? settings.get_double(key) : settings.get_int(key));
-        row.connect('notify::value', () => {
-            if (isDouble)
-                settings.set_double(key, row.get_value());
-            else
-                settings.set_int(key, Math.round(row.get_value()));
-        });
-
-        return row;
-    }
 }
 
-function _rgbaFromSetting(value, fallback) {
-    const rgba = new Gdk.RGBA();
-    const source = (value || fallback).split(',').map(Number.parseFloat);
-    const [red, green, blue, alpha] = source.length === 4 && source.every(Number.isFinite)
-        ? source
-        : fallback.split(',').map(Number.parseFloat);
-
-    rgba.red = red;
-    rgba.green = green;
-    rgba.blue = blue;
-    rgba.alpha = alpha;
-    return rgba;
-}
-
-function _rgbaToSetting(rgba) {
-    return [
-        rgba.red.toFixed(3),
-        rgba.green.toFixed(3),
-        rgba.blue.toFixed(3),
-        rgba.alpha.toFixed(3),
-    ].join(',');
-}
-
-function _listInstalledTesseractLanguages() {
-    const directory = Gio.File.new_for_path(TESSDATA_DIR);
-    const languages = [];
-    let enumerator = null;
-
-    try {
-        enumerator = directory.enumerate_children(
-            'standard::name,standard::type',
-            Gio.FileQueryInfoFlags.NONE,
-            null
-        );
-
-        let info;
-        while ((info = enumerator.next_file(null)) !== null) {
-            if (info.get_file_type() !== Gio.FileType.REGULAR)
-                continue;
-
-            const name = info.get_name();
-            if (!name.endsWith('.traineddata'))
-                continue;
-
-            const code = name.slice(0, -'.traineddata'.length);
-            if (/^[A-Za-z0-9_]+$/.test(code) && !HIDDEN_TESSERACT_LANGUAGES.has(code))
-                languages.push(code);
-        }
-    } catch (_e) {
-    } finally {
-        try {
-            enumerator?.close(null);
-        } catch (_e) {
-        }
-    }
-
-    return languages.sort();
-}
-
-function _normalizeLanguageSelection(languages, installedLanguages = null) {
-    const installed = installedLanguages ? new Set(installedLanguages) : null;
-    const normalized = [];
-    const seen = new Set();
-
-    if (!Array.isArray(languages))
-        languages = [];
-
-    for (const language of languages) {
-        const code = String(language).trim();
-        if (!code || !/^[A-Za-z0-9_]+$/.test(code) || seen.has(code))
-            continue;
-
-        if (installed && !installed.has(code))
-            continue;
-
-        normalized.push(code);
-        seen.add(code);
-    }
-
-    if (normalized.length > 0)
-        return normalized;
-
-    const fallback = DEFAULT_OCR_LANGUAGES.find(language => !installed || installed.has(language));
-    if (fallback)
-        return [fallback];
-
-    return installedLanguages?.length > 0 ? [installedLanguages[0]] : [...DEFAULT_OCR_LANGUAGES];
-}

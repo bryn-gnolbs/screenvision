@@ -1,16 +1,13 @@
 {
-  "name": "Shotzy",
-  "description": "Google Lens search, OCR, and QR scanning in the GNOME Screenshot tool.",
-  "uuid": "shotzy@SamkitJain660.github.io",
-  "settings-schema": "org.gnome.shell.extensions.shotzy",
+  "name": "ScreenVision",
+  "description": "Text recognition, QR scanning and Google Lens search inside the GNOME screenshot tool. Based on Shotzy by Samkit Jain.",
+  "uuid": "screenvision@genolabs.net",
+  "settings-schema": "org.gnome.shell.extensions.screenvision",
+  "gettext-domain": "screenvision",
   "shell-version": [
     "49",
     "50"
   ],
-  "url": "https://github.com/SamkitJain660/Shotzy",
-  "version": 8,
-  "donations": {
-    "kofi": "samkitjain",
-    "paypal": "SamkitJain308"
-  }
+  "url": "https://github.com/bryn-gnolbs/screenvision",
+  "version": 2
 }

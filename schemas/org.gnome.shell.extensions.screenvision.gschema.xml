@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.shotzy"
-          path="/org/gnome/shell/extensions/shotzy/">
+  <schema id="org.gnome.shell.extensions.screenvision"
+          path="/org/gnome/shell/extensions/screenvision/">
     <key name="highlight-fill-color" type="s">
       <default>'0.10,0.11,0.13,0.34'</default>
       <summary>Highlight fill color</summary>
@@ -37,6 +37,16 @@
       <summary>Enable OCR highlighting</summary>
       <description>Enable OCR processing and highlight rendering in the screenshot UI.</description>
     </key>
+    <key name="remember-enabled" type="b">
+      <default>true</default>
+      <summary>Remember with Enter</summary>
+      <description>When Enter is pressed in the overlay, add what was selected (text, links, codes, source window and the saved image path) to a private local memory log for the assistant.</description>
+    </key>
+    <key name="read-whole-screen" type="b">
+      <default>true</default>
+      <summary>Read the whole screen</summary>
+      <description>Recognise all text and codes on the screen when the screenshot tool opens, so selections update instantly while dragging. Runs locally.</description>
+    </key>
     <key name="selection-confidence" type="i">
       <default>10</default>
       <summary>OCR confidence threshold</summary>
@@ -62,15 +72,10 @@
       <summary>Search engine</summary>
       <description>The search engine to use for the OCR 'Search' button.</description>
     </key>
-    <key name="show-google-lens-button" type="b">
-      <default>true</default>
-      <summary>Show Google Lens button</summary>
-      <description>Show the Google Lens button in the screenshot UI.</description>
-    </key>
-    <key name="show-qr-button" type="b">
-      <default>true</default>
-      <summary>Show QR code button</summary>
-      <description>Show the QR code button in the screenshot UI.</description>
+    <key name="screenshot-shortcut" type="as">
+      <default>['Print']</default>
+      <summary>Screenshot shortcut</summary>
+      <description>Keyboard shortcut that opens the screenshot tool. When it matches GNOME's own screenshot shortcut, GNOME handles it. An empty list disables the extra shortcut.</description>
     </key>
   </schema>
 </schemalist>

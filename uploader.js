@@ -1,121 +1,179 @@
+// Google Lens hand-off.
+//
+// Lens keeps an uploaded image in the browser session that uploaded it, so
+// the browser itself has to send the image (uploading from the shell and
+// opening the results link shows an empty image). We serve a one-time page on
+// 127.0.0.1 that fetches the image from us and submits it to Lens with the
+// browser's own session. Unlike a file in /tmp, this also works for sandboxed
+// Snap/Flatpak browsers.
+//
+// The server only listens on loopback, every URL contains a random token, and
+// it shuts down once the image has been fetched (or after a timeout).
+
 import GLib from 'gi://GLib';
-import Gio from 'gi://Gio';
+import Soup from 'gi://Soup?version=3.0';
 
-export class LensUploader {
-    async upload(filePath) {
-        const file = Gio.File.new_for_path(filePath);
-        let launcherPath = null;
+const LENS_UPLOAD_URL = 'https://lens.google.com/v3/upload';
+const SERVE_TIMEOUT_MS = 120_000;
+// Leave the page a moment to finish submitting after it fetched the image.
+const SHUTDOWN_DELAY_MS = 5_000;
 
-        try {
-            const contents = await new Promise((resolve, reject) => {
-                file.load_contents_async(null, (_obj, res) => {
-                    try {
-                        const [success, bytes] = file.load_contents_finish(res);
-                        if (!success) {
-                            reject(new Error('Read failed'));
-                            return;
-                        }
-
-                        resolve(bytes);
-                    } catch (e) {
-                        reject(e);
-                    }
-                });
-            });
-
-            const guessedType = Gio.content_type_guess(filePath, contents)[0];
-            const mimeType = Gio.content_type_get_mime_type(guessedType) ?? 'application/octet-stream';
-            const imageDataUrl = `data:${mimeType};base64,${GLib.base64_encode(contents)}`;
-
-            launcherPath = GLib.build_filenamev([
-                GLib.get_tmp_dir(),
-                `shotzy_upload_${GLib.uuid_string_random()}.html`,
-            ]);
-
-            const launcherHtml = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Shotzy Upload</title>
-</head>
-<body style="margin:0;min-height:100vh;display:grid;place-items:center;font-family:sans-serif;background:#f6f7fb;color:#202124;">
-  <div id="status">Uploading to Google Lens...</div>
-  <script>
-    (async () => {
-      try {
-        const imageDataUrl = ${JSON.stringify(imageDataUrl)};
-
-        const container = document.createElement("div");
-        container.style.display = "none";
-        document.body.appendChild(container);
-
-        const form = document.createElement("form");
-        form.action = \`https://lens.google.com/v3/upload?ep=ccm&s=&st=\${Date.now()}\`;
-        form.method = "POST";
-        form.enctype = "multipart/form-data";
-        container.appendChild(form);
-
-        const fileInput = document.createElement("input");
-        fileInput.type = "file";
-        fileInput.name = "encoded_image";
-        form.appendChild(fileInput);
-
-        const dimensionsInput = document.createElement("input");
-        dimensionsInput.type = "text";
-        dimensionsInput.name = "processed_image_dimensions";
-        dimensionsInput.value = "1000,1000";
-        form.appendChild(dimensionsInput);
-
-        const result = await fetch(imageDataUrl);
-        const blob = await result.blob();
-        const dataTransfer = new DataTransfer();
-        const fileObject = new File([blob], "image", { type: blob.type || "application/octet-stream" });
-        dataTransfer.items.add(fileObject);
-        fileInput.files = dataTransfer.files;
-
-        form.submit();
-        container.remove();
-      } catch (error) {
-        document.getElementById("status").textContent = error.message;
-      }
-    })();
-  </script>
-</body>
-</html>`;
-
-            GLib.file_set_contents(launcherPath, launcherHtml);
-
-            const launcherFile = Gio.File.new_for_path(launcherPath);
-            Gio.AppInfo.launch_default_for_uri(launcherFile.get_uri(), null);
-
-            this._scheduleDelete(launcherPath, 60);
-        } catch (e) {
-            if (launcherPath)
-                this._deleteFile(launcherPath);
-
-            log(`Shotzy upload failed: ${e.message}`);
-            throw e;
-        } finally {
-            this._deleteFile(filePath);
-        }
+export class LensLauncher {
+    /**
+     * @param {object} [options]
+     * @param {number} [options.shutdownDelayMs] - how long to keep serving
+     *   after the image was fetched (tests use a short delay)
+     */
+    constructor({shutdownDelayMs = SHUTDOWN_DELAY_MS} = {}) {
+        this._handoffs = new Set();
+        this._shutdownDelayMs = shutdownDelayMs;
     }
 
-    _scheduleDelete(path, delaySeconds) {
-        GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delaySeconds, () => {
-            this._deleteFile(path);
+    destroy() {
+        for (const handoff of this._handoffs)
+            handoff.stop();
+        this._handoffs.clear();
+    }
+
+    /**
+     * Start serving a page that uploads the image to Google Lens.
+     *
+     * @param {Uint8Array} pngBytes - the encoded image
+     * @param {number} width - image width in pixels
+     * @param {number} height - image height in pixels
+     * @returns {string} http://127.0.0.1 URL to open in the browser
+     */
+    serve(pngBytes, width, height) {
+        const handoff = new LensHandoff(pngBytes, width, height, this._shutdownDelayMs,
+            () => this._handoffs.delete(handoff));
+        this._handoffs.add(handoff);
+        return handoff.url;
+    }
+}
+
+class LensHandoff {
+    constructor(pngBytes, width, height, shutdownDelayMs, onStopped) {
+        this._png = pngBytes;
+        this._shutdownDelayMs = shutdownDelayMs;
+        this._width = width;
+        this._height = height;
+        this._onStopped = onStopped;
+        this._token = GLib.uuid_string_random();
+        this._timeoutId = 0;
+
+        this._server = new Soup.Server();
+        this._server.add_handler(`/${this._token}`, (_server, message, path) => {
+            this._handleRequest(message, path);
+        });
+        this._server.listen_local(0, Soup.ServerListenOptions.IPV4_ONLY);
+
+        const port = this._server.get_uris()[0].get_port();
+        this.url = `http://127.0.0.1:${port}/${this._token}/`;
+
+        this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SERVE_TIMEOUT_MS, () => {
+            this._timeoutId = 0;
+            this.stop();
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _deleteFile(path) {
-        if (!path || !GLib.file_test(path, GLib.FileTest.EXISTS))
+    stop() {
+        if (!this._server)
             return;
 
-        try {
-            GLib.unlink(path);
-        } catch (e) {
-            log(`Shotzy cleanup failed for ${path}: ${e.message}`);
+        if (this._timeoutId) {
+            GLib.source_remove(this._timeoutId);
+            this._timeoutId = 0;
+        }
+        this._server.disconnect();
+        this._server = null;
+        this._png = null;
+        this._onStopped();
+    }
+
+    _handleRequest(message, path) {
+        const headers = message.get_response_headers();
+        headers.append('Cache-Control', 'no-store');
+        // Don't reveal the local URL (and its token) to Google.
+        headers.append('Referrer-Policy', 'no-referrer');
+
+        if (message.get_method() !== 'GET') {
+            message.set_status(405, null);
+            return;
+        }
+
+        if (path === `/${this._token}/`) {
+            message.set_status(200, null);
+            message.set_response('text/html; charset=utf-8', Soup.MemoryUse.COPY,
+                new TextEncoder().encode(buildPage(this._width, this._height)));
+        } else if (path === `/${this._token}/image.png` && this._png) {
+            message.set_status(200, null);
+            message.set_response('image/png', Soup.MemoryUse.COPY, this._png);
+            this._scheduleShutdown();
+        } else {
+            message.set_status(404, null);
         }
     }
+
+    _scheduleShutdown() {
+        if (this._timeoutId)
+            GLib.source_remove(this._timeoutId);
+
+        this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._shutdownDelayMs, () => {
+            this._timeoutId = 0;
+            this.stop();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+}
+
+/**
+ * The hand-off page: fetch the image from this server, put it in a file
+ * input and submit the form to Lens, exactly like a manual upload.
+ *
+ * @param {number} width - image width in pixels
+ * @param {number} height - image height in pixels
+ * @returns {string} HTML
+ */
+export function buildPage(width, height) {
+    const dimensions = `${Math.round(width)},${Math.round(height)}`;
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<title>ScreenVision → Google Lens</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font: 16px system-ui, sans-serif; background: #f6f7fb; color: #202124; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e20; color: #e8e8ea; } }
+</style>
+</head>
+<body>
+<p id="status">Sending your screenshot to Google Lens…</p>
+<form id="lens" method="POST" enctype="multipart/form-data" hidden>
+  <input type="file" name="encoded_image">
+  <input type="text" name="processed_image_dimensions" value="${dimensions}">
+</form>
+<script>
+(async () => {
+  const status = document.getElementById('status');
+  try {
+    const response = await fetch('image.png', {cache: 'no-store'});
+    if (!response.ok)
+      throw new Error('This link has expired. Take the screenshot again.');
+    const blob = await response.blob();
+    const form = document.getElementById('lens');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([blob], 'screenshot.png', {type: 'image/png'}));
+    form.elements.encoded_image.files = transfer.files;
+    form.action = '${LENS_UPLOAD_URL}?ep=ccm&s=&st=' + Date.now();
+    form.submit();
+  } catch (error) {
+    status.textContent = error.message;
+  }
+})();
+</script>
+</body>
+</html>`;
 }

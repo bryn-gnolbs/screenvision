@@ -1,0 +1,13 @@
+{
+  "name": "screenvision",
+  "private": true,
+  "description": "Development tooling for the ScreenVision GNOME Shell extension (not shipped).",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0"
+  }
+}

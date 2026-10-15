@@ -1,0 +1,6 @@
+{
+  "name": "ScreenVision smoke-test driver",
+  "description": "Only installed inside the throwaway shell started by tests/smoke/run.sh.",
+  "uuid": "ssv-smoke-driver@test",
+  "shell-version": ["49", "50"]
+}
