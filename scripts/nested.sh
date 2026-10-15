@@ -22,6 +22,8 @@ fi
 [ -e "$CRASH_FILE" ] && existed=1 || existed=0
 
 echo "Starting nested GNOME Shell (full log: $LOG). Close its window to stop."
+echo "Note: Snap apps (e.g. Firefox) cannot launch from the nested shell, so test Google Lens"
+echo "      and the Search button on your real desktop instead."
 MUTTER_DEBUG_DUMMY_MODE_SPECS=1600x900 \
     dbus-run-session gnome-shell --devkit --wayland 2>&1 \
     | tee "$LOG" \

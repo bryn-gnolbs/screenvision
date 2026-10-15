@@ -94,7 +94,12 @@ make nested
 In the nested shell press Print Screen to open the screenshot tool. The terminal shows only
 ScreenVision messages and JavaScript errors; the full log is in `build/nested.log`. Errors
 from your other installed extensions show up there too, since the nested shell loads them.
-After a code change, close the window and run `make nested` again; no re-login needed. Settings and enabled
+After a code change, close the window and run `make nested` again; no re-login needed.
+
+**Limitation:** Snap apps (Ubuntu's Firefox included) refuse to start from the nested shell,
+because it runs on a private D-Bus outside a normal desktop session. Google Lens and the
+Search button do hand their URL to the browser there, but Snap blocks the launch. Test those
+on your real desktop (log out and back in after `make install`). Settings and enabled
 extensions are shared with your real session. If you also have the original Shotzy
 installed, disable one of them so both don't add buttons.
 
