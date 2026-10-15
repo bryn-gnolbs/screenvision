@@ -1,4 +1,4 @@
-// Scripted end-to-end check, loaded next to Smart ScreenVision inside a
+// Scripted end-to-end check, loaded next to ScreenVision inside a
 // headless GNOME Shell (see run.sh). It puts text on screen, opens the
 // screenshot UI, selects the text and reports what the extension did as
 // "SMOKE <name> <json>" lines in the shell log.
@@ -13,7 +13,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const UUID = 'smart-screenvision@genolabs.net';
 const OUT_DIR = GLib.getenv('SSV_SMOKE_OUT');
-const SAMPLE_TEXT = 'Smart ScreenVision reads this 2026';
+const SAMPLE_TEXT = 'ScreenVision reads this 2026';
 
 const sleep = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
     resolve();

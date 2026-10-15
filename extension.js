@@ -265,7 +265,7 @@ export default class SmartScreenVisionExtension extends Extension {
             return;
 
         ui.close();
-        Main.notify(_('Smart ScreenVision'), _('Sending image to Google Lens…'));
+        Main.notify(_('ScreenVision'), _('Sending image to Google Lens…'));
 
         try {
             const url = await this._uploader.upload(capture.png,
@@ -273,7 +273,7 @@ export default class SmartScreenVisionExtension extends Extension {
             Gio.AppInfo.launch_default_for_uri(url, null);
         } catch (e) {
             logError('Google Lens upload failed', e);
-            Main.notify(_('Smart ScreenVision'), _('Google Lens search failed: %s').format(e.message));
+            Main.notify(_('ScreenVision'), _('Google Lens search failed: %s').format(e.message));
         }
     }
 

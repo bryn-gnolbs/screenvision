@@ -1,9 +1,9 @@
-# Smart ScreenVision
+# ScreenVision
 
 Text recognition, QR scanning and Google Lens search inside the built-in GNOME
 screenshot tool (GNOME 49–50).
 
-Smart ScreenVision is a fork of [Shotzy](https://github.com/SamkitJain660/Shotzy) by
+ScreenVision is a fork of [Shotzy](https://github.com/SamkitJain660/Shotzy) by
 Samkit Jain, licensed under the GPL-3.0 like the original.
 
 ## Features

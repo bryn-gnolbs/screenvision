@@ -1,4 +1,4 @@
-# Developing Smart ScreenVision
+# Developing ScreenVision
 
 A field guide for people who know Python but are new to GNOME Shell extensions.
 

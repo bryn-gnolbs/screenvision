@@ -1,5 +1,5 @@
 {
-  "name": "Smart ScreenVision",
+  "name": "ScreenVision",
   "description": "Text recognition, QR scanning and Google Lens search inside the GNOME screenshot tool. Based on Shotzy by Samkit Jain.",
   "uuid": "smart-screenvision@genolabs.net",
   "settings-schema": "org.gnome.shell.extensions.smart-screenvision",
