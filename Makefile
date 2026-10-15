@@ -2,7 +2,7 @@
 
 UUID := screenvision@genolabs.net
 ZIP := build/$(UUID).shell-extension.zip
-SOURCES := $(shell git ls-files '*.js' '*.css' '*.json' '*.xml' 2>/dev/null)
+SOURCES := $(shell git ls-files --cached --others --exclude-standard '*.js' '*.css' '*.json' '*.xml' 2>/dev/null)
 
 .PHONY: help test lint smoke pack install uninstall enable disable prefs logs nested clean
 

@@ -1,63 +1,34 @@
 // Entry point. GNOME Shell calls enable() when the extension is switched on
 // (and on every unlock) and disable() when it is switched off (and on every
 // lock), so disable() must undo everything enable() did.
+//
+// ScreenVision takes over GNOME's screenshot tool in screenshot mode: the
+// stock toolbar is hidden and replaced by the selection, the assistant's
+// bubble and a slim pill. In screen-recording mode it steps aside completely
+// and GNOME's own interface is shown.
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
-import GObject from 'gi://GObject';
-import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     Extension, InjectionManager, gettext as _,
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {captureSelection, isSelectionMode} from './capture.js';
+import {captureSelection} from './capture.js';
 import {LiveVisionController} from './live.js';
 import {ScreenshotShortcut} from './shortcut.js';
 import {LensLauncher} from './uploader.js';
 import {logError} from './lib/common.js';
-import {codesAvailable, scanCodes} from './lib/vision/codes.js';
+import {VisionPill} from './ui/pill.js';
 
-const NOTIFY_PREVIEW_CHARS = 120;
-
-const Tooltip = GObject.registerClass(
-class Tooltip extends St.Label {
-    _init(widget, text) {
-        super._init({
-            text,
-            style_class: 'screenshot-ui-tooltip',
-            visible: false,
-        });
-
-        widget.connectObject(
-            'notify::hover', () => (widget.hover ? this._show(widget) : this._hide()),
-            'destroy', () => this.destroy(),
-            this);
-    }
-
-    _show(widget) {
-        const extents = widget.get_transformed_extents();
-        const x = Math.floor(extents.get_x() + (extents.get_width() - this.width) / 2);
-        const y = extents.get_y() + extents.get_height() + 6;
-
-        this.remove_all_transitions();
-        this.set_position(x, y);
-        this.opacity = 0;
-        this.show();
-        this.ease({
-            opacity: 255,
-            delay: 500,
-            duration: 120,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-        });
-    }
-
-    _hide() {
-        this.remove_all_transitions();
-        this.hide();
-    }
-});
+const ENTER_KEYS = new Set([Clutter.KEY_Return, Clutter.KEY_KP_Enter, Clutter.KEY_ISO_Enter]);
+// Stock shortcuts for features ScreenVision replaces (Space captured, C/W
+// switched to screen/window mode, V to recording, P toggled the pointer).
+const BLOCKED_KEYS = new Set([
+    Clutter.KEY_space, Clutter.KEY_c, Clutter.KEY_C, Clutter.KEY_w, Clutter.KEY_W,
+    Clutter.KEY_v, Clutter.KEY_V, Clutter.KEY_p, Clutter.KEY_P,
+]);
 
 export default class ScreenVisionExtension extends Extension {
     enable() {
@@ -68,18 +39,19 @@ export default class ScreenVisionExtension extends Extension {
         this._settings = this.getSettings();
         this._injections = new InjectionManager();
         this._lens = new LensLauncher();
+        this._pill = new VisionPill({
+            onWholeScreen: () => this._selectWholeScreen(ui),
+            onClose: () => ui.close(),
+        });
+        ui.add_child(this._pill);
         this._live = new LiveVisionController(this._settings, {
             searchWithLens: () => this._searchWithLens(ui).catch(e => logError('Google Lens', e)),
+            avoidRect: () => this._pill?.rect ?? null,
         });
         this._shortcut = new ScreenshotShortcut(this._settings);
 
         this._hookScreenshotUI(ui);
-        this._createButtons(ui);
-        this._syncButtons();
-        this._settings.connectObject(
-            'changed::show-google-lens-button', () => this._syncButtons(),
-            'changed::show-qr-button', () => this._syncButtons(),
-            this);
+        this._syncMode(ui);
     }
 
     disable() {
@@ -87,23 +59,19 @@ export default class ScreenVisionExtension extends Extension {
         if (!ui || !this._settings)
             return;
 
-        // Restore the original screenshot UI methods and signal handlers.
+        // Restore the original screenshot UI methods, signals and toolbar.
         this._injections.clear();
         this._injections = null;
         ui._areaSelector?.disconnectObject(this);
         ui._selectionButton?.disconnectObject(this);
+        ui._castButton?.disconnectObject(this);
         ui.disconnectObject(this);
-        this._settings.disconnectObject(this);
+        this._setStockToolbarVisible(ui, true);
+
         this._shortcut.destroy();
         this._shortcut = null;
-
-        this._restoreDefaultLayout(ui);
-        this._lensButton?.destroy();
-        this._lensButton = null;
-        this._qrButton?.destroy();
-        this._qrButton = null;
-
-
+        this._pill.destroy();
+        this._pill = null;
         this._live.destroy();
         this._live = null;
         this._lens.destroy();
@@ -111,144 +79,112 @@ export default class ScreenVisionExtension extends Extension {
         this._settings = null;
     }
 
+    /** True in screenshot mode, where ScreenVision's interface is shown. */
+    _isVisionMode(ui) {
+        return !ui._castButton?.checked;
+    }
+
     _hookScreenshotUI(ui) {
         const live = this._live;
+        const self = this;
 
-        // Start reading the screen each time the screenshot tool opens.
+        // Each time the tool opens: pick the interface and start reading the screen.
         this._injections.overrideMethod(ui, 'open', original => {
             return async function (...args) {
                 const result = await original.apply(this, args);
-                live.onOpened(this);
+                self._syncMode(this);
+                if (self._isVisionMode(this)) {
+                    this._selectionButton.checked = true;
+                    live.onOpened(this);
+                }
                 return result;
             };
         });
 
-        // Update highlights and suggestions on every move of the selection.
+        // Update highlights and the bubble on every move of the selection.
         if (ui._areaSelector) {
             this._injections.overrideMethod(ui._areaSelector, '_updateSelectionRect', original => {
                 return function (...args) {
                     const result = original.apply(this, args);
-                    live.refreshSelection(ui);
+                    if (self._isVisionMode(ui)) {
+                        live.refreshSelection(ui);
+                        self._pill.yieldTo(live.selectionRect(ui));
+                    }
                     return result;
                 };
             });
 
             // On release, read the selection again at full detail.
             ui._areaSelector.connectObject('drag-ended', () => {
-                live.recognizeSelection(ui).catch(e => logError('Text recognition failed', e));
+                if (self._isVisionMode(ui))
+                    live.recognizeSelection(ui).catch(e => logError('Text recognition failed', e));
             }, this);
         }
 
-        // Hide or show suggestions when switching modes; the screen reading
-        // is kept, so returning to selection mode is instant.
         ui._selectionButton?.connectObject('notify::checked', () => live.refreshSelection(ui), this);
 
+        // Recording mode gets GNOME's own interface back.
+        ui._castButton?.connectObject('notify::checked', () => {
+            this._syncMode(ui);
+            if (this._isVisionMode(ui))
+                live.refreshSelection(ui);
+            else
+                live.reset();
+        }, this);
+
+        // Runs before the stock key handler, so ScreenVision decides first.
+        ui.connectObject('key-press-event', (_actor, event) => this._onKeyPress(ui, event), this);
         ui.connectObject('closed', () => live.reset(), this);
     }
 
-    _createButtons(ui) {
-        if (!ui._panel || !ui._showPointerButtonContainer)
-            return;
-
-        this._lensButton = this._makeActionButton(ui, {
-            iconName: 'system-search-symbolic',
-            styleClass: 'ssv-lens-button',
-            tooltip: _('Search with Google Lens'),
-            onClicked: () => this._searchWithLens(ui),
-        });
-        ui._showPointerButtonContainer.add_child(this._lensButton);
-
-        this._qrButton = this._makeActionButton(ui, {
-            iconName: 'view-grid-symbolic',
-            styleClass: 'ssv-qr-button',
-            tooltip: _('Scan QR code'),
-            onClicked: () => this._scanQrCode(ui),
-        });
+    _syncMode(ui) {
+        const vision = this._isVisionMode(ui);
+        this._setStockToolbarVisible(ui, !vision);
+        this._pill.visible = vision;
+        if (vision)
+            ui.set_child_above_sibling(this._pill, null);
     }
 
-    _makeActionButton(ui, {iconName, styleClass, tooltip, onClicked}) {
-        const button = new St.Button({
-            // Reuse the screenshot UI's own class so the button looks native.
-            style_class: `screenshot-ui-show-pointer-button ${styleClass}`,
-            child: new St.Icon({icon_name: iconName, icon_size: 24}),
-            can_focus: true,
-            accessible_name: tooltip,
-        });
-        button.connect('clicked', () => {
-            onClicked().catch(e => {
-                logError(tooltip, e);
-                this._showToast(_('Something went wrong: %s').format(e.message));
-            });
-        });
-        ui.add_child(new Tooltip(button, tooltip));
-        return button;
+    _setStockToolbarVisible(ui, visible) {
+        if (ui._panel)
+            ui._panel.visible = visible;
+        if (ui._closeButton)
+            ui._closeButton.visible = visible;
     }
 
-    _syncButtons() {
-        const ui = Main.screenshotUI;
-        if (!this._lensButton || !this._qrButton)
-            return;
+    _onKeyPress(ui, event) {
+        if (!this._isVisionMode(ui))
+            return Clutter.EVENT_PROPAGATE;
 
-        this._lensButton.visible = this._settings.get_boolean('show-google-lens-button');
+        const symbol = event.get_key_symbol();
+        const control = (event.get_state() & Clutter.ModifierType.CONTROL_MASK) !== 0;
 
-        const showQr = this._settings.get_boolean('show-qr-button');
-        this._qrButton.visible = showQr;
-        if (showQr)
-            this._useSideBoxLayout(ui);
-        else
-            this._restoreDefaultLayout(ui);
-    }
-
-    /**
-     * The QR button sits in a column to the right of the screenshot toolbar.
-     * The toolbar's own rows are moved into a wrapper next to that column:
-     *
-     *   _panel ─ wrapper ─┬─ innerBox ─┬─ _typeButtonContainer
-     *                     │            └─ _bottomRowContainer
-     *                     └─ sideBox ─── QR button
-     */
-    _useSideBoxLayout(ui) {
-        if (this._layoutWrapper)
-            return;
-
-        const typeRow = ui._typeButtonContainer;
-        const bottomRow = ui._bottomRowContainer;
-        if (!typeRow || !bottomRow)
-            return;
-
-        this._layoutWrapper = new St.BoxLayout();
-        this._layoutInner = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL});
-        this._sideBox = new St.BoxLayout({
-            orientation: Clutter.Orientation.VERTICAL,
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'ssv-side-box',
-        });
-
-        ui._panel.remove_child(typeRow);
-        ui._panel.remove_child(bottomRow);
-        this._layoutInner.add_child(typeRow);
-        this._layoutInner.add_child(bottomRow);
-        this._sideBox.add_child(this._qrButton);
-        this._layoutWrapper.add_child(this._layoutInner);
-        this._layoutWrapper.add_child(this._sideBox);
-        ui._panel.add_child(this._layoutWrapper);
-    }
-
-    _restoreDefaultLayout(ui) {
-        if (!this._layoutWrapper)
-            return;
-
-        for (const row of [ui._typeButtonContainer, ui._bottomRowContainer]) {
-            this._layoutInner.remove_child(row);
-            ui._panel.add_child(row);
+        if (ENTER_KEYS.has(symbol)) {
+            this._live.remember(ui).catch(e => logError('Remembering failed', e));
+            return Clutter.EVENT_STOP;
         }
-        this._sideBox.remove_child(this._qrButton);
+        if (control && (symbol === Clutter.KEY_c || symbol === Clutter.KEY_C)) {
+            this._live.copySelection(ui).catch(e => logError('Copying failed', e));
+            return Clutter.EVENT_STOP;
+        }
+        if (!control && BLOCKED_KEYS.has(symbol))
+            return Clutter.EVENT_STOP;
 
-        // Destroying the wrapper also destroys the inner and side boxes.
-        this._layoutWrapper.destroy();
-        this._layoutWrapper = null;
-        this._layoutInner = null;
-        this._sideBox = null;
+        return Clutter.EVENT_PROPAGATE;
+    }
+
+    /** Select the whole primary monitor, as if dragged corner to corner. */
+    _selectWholeScreen(ui) {
+        const monitor = Main.layoutManager.primaryMonitor;
+        const selector = ui._areaSelector;
+        if (!monitor || !selector)
+            return;
+
+        ui._selectionButton.checked = true;
+        [selector._startX, selector._startY] = [monitor.x, monitor.y];
+        [selector._lastX, selector._lastY] = [monitor.x + monitor.width - 1, monitor.y + monitor.height - 1];
+        selector._updateSelectionRect();
+        selector.emit('drag-ended');
     }
 
     async _searchWithLens(ui) {
@@ -267,43 +203,5 @@ export default class ScreenVisionExtension extends Extension {
             logError('Google Lens hand-off failed', e);
             Main.notify(_('ScreenVision'), _('Could not open Google Lens: %s').format(e.message));
         }
-    }
-
-    async _scanQrCode(ui) {
-        if (!isSelectionMode(ui)) {
-            this._showToast(_('Select an area to scan for QR codes'));
-            return;
-        }
-        if (!codesAvailable()) {
-            this._showToast(_('Install zbar (zbarimg) to scan QR codes'));
-            return;
-        }
-
-        // Codes found when the screen was read are instant; otherwise scan
-        // the selection itself (small codes read better close up).
-        let codes = this._live.context.select(this._live.selectionRect(ui)).codes;
-        if (codes.length === 0) {
-            const capture = await captureSelection(ui);
-            codes = capture ? await scanCodes(capture.png) : [];
-        }
-
-        if (codes.length === 0) {
-            this._showToast(_('No QR code found in the selection'));
-            return;
-        }
-
-        const content = codes.map(code => code.data).join('\n');
-        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, content);
-        ui.close();
-
-        const preview = content.length > NOTIFY_PREVIEW_CHARS
-            ? `${content.slice(0, NOTIFY_PREVIEW_CHARS)}…`
-            : content;
-        Main.notify(_('QR code copied'), preview);
-    }
-
-    /** Say something short through the assistant's bubble. */
-    _showToast(text) {
-        this._live.flash(text);
     }
 }

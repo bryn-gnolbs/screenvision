@@ -14,6 +14,7 @@ import {
     SEARCH_ENGINES, formatRgbaSetting, hasProgram, parseRgbaSetting,
 } from './lib/common.js';
 import {listTesseractLanguages, normalizeLanguageSelection} from './lib/vision/tesseract.js';
+import {MemoryStore} from './lib/memory.js';
 import {interpretKeyPress} from './lib/shortcutKeys.js';
 
 export default class ScreenVisionPreferences extends ExtensionPreferences {
@@ -52,19 +53,18 @@ export default class ScreenVisionPreferences extends ExtensionPreferences {
         }));
         page.add(shortcutGroup);
 
-        const buttonsGroup = new Adw.PreferencesGroup({
-            title: _('Screenshot Buttons'),
-            description: _('Extra buttons shown in the screenshot tool.'),
+        const memoryGroup = new Adw.PreferencesGroup({
+            title: _('Memory'),
+            description: _('Press Enter in the screenshot tool to keep what you selected. ' +
+                'The image goes to Pictures/Screenshots; the text, links and codes go to a ' +
+                'private log on this computer that the assistant will learn from.'),
         });
-        buttonsGroup.add(this._switchRow(settings, 'show-google-lens-button', {
-            title: _('Google Lens'),
-            subtitle: _('Send the selected area to Google Lens. The image is uploaded to Google.'),
+        memoryGroup.add(this._switchRow(settings, 'remember-enabled', {
+            title: _('Remember with Enter'),
+            subtitle: _('Add what you keep to the memory log. When off, Enter only saves the image.'),
         }));
-        buttonsGroup.add(this._switchRow(settings, 'show-qr-button', {
-            title: _('QR code scanner'),
-            subtitle: _('Read QR codes and barcodes in the selected area and copy their content.'),
-        }));
-        page.add(buttonsGroup);
+        memoryGroup.add(this._forgetRow(window));
+        page.add(memoryGroup);
 
         return page;
     }
@@ -321,6 +321,39 @@ export default class ScreenVisionPreferences extends ExtensionPreferences {
         dialog.connect('closed', () => toplevel?.restore_system_shortcuts());
         dialog.present(window);
         toplevel?.inhibit_system_shortcuts(null);
+    }
+
+    /** "Forget all" with a confirmation, since it cannot be undone. */
+    _forgetRow(window) {
+        const store = new MemoryStore();
+        const row = new Adw.ActionRow({
+            title: _('Forget everything'),
+            subtitle: _('Delete the memory log. Saved screenshots stay in your Pictures folder.'),
+        });
+        const button = new Gtk.Button({
+            label: _('Forget All'),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
+        });
+        button.connect('clicked', () => {
+            const dialog = new Adw.AlertDialog({
+                heading: _('Forget everything?'),
+                body: _('All remembered text, links and codes will be deleted. This cannot be undone.'),
+            });
+            dialog.add_response('cancel', _('Cancel'));
+            dialog.add_response('forget', _('Forget All'));
+            dialog.set_response_appearance('forget', Adw.ResponseAppearance.DESTRUCTIVE);
+            dialog.set_default_response('cancel');
+            dialog.connect('response', (_dialog, response) => {
+                if (response !== 'forget')
+                    return;
+                store.forgetAll();
+                window.add_toast(new Adw.Toast({title: _('Memories forgotten')}));
+            });
+            dialog.present(window);
+        });
+        row.add_suffix(button);
+        return row;
     }
 
     _switchRow(settings, key, {title, subtitle}) {

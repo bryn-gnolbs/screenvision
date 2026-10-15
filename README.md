@@ -17,9 +17,16 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
   read, word by word.
 - **Smart suggestions:** the card's buttons adapt to what you select: open links, copy a
   Wi-Fi password from a QR code, write an email, **Copy** text, **Search** it, or ask **Lens**.
-- **QR codes:** codes on screen are found automatically; the grid button copies them too.
-- **Google Lens:** the magnifier button sends the selected area to Google Lens and opens
-  the results in your browser.
+- **Remember (Enter):** keep the moment. The image is saved to *Pictures/Screenshots* and
+  what you selected (text, links, emails, QR content, the app it came from) goes into a
+  private memory log on your computer, which the coming assistant will learn from. Your
+  clipboard is left alone.
+- **QR codes** are found automatically, small ones included.
+- **Google Lens:** the **Lens** suggestion sends the selection to Google Lens and opens the
+  results in your browser.
+- **A calm interface:** GNOME's screenshot toolbar is replaced by your selection, the card
+  and a slim pill at the bottom (*Whole screen*, a hint, close). GNOME's screen recording
+  (Ctrl+Shift+Alt+R) still opens the original interface.
 - **Your own shortcut:** open the screenshot tool with any key combination, such as
   Super+Shift+S, set under *General → Keyboard Shortcut*. Print Screen keeps working too.
 
@@ -39,6 +46,15 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
   tessdata locations work without setting `TESSDATA_PREFIX`.
 - Uses GNOME's `InjectionManager`, a stylesheet and translatable strings; covered by
   unit tests and an automated end-to-end test.
+
+## Keys
+
+| Key | Does |
+|---|---|
+| Drag | Select an area; text and suggestions follow live |
+| **Enter** | Remember: save the image and add what was selected to memory |
+| **Ctrl+C** | Copy the selected text (or the image if there is no text) |
+| **Esc** | Close |
 
 ## Dependencies
 
@@ -84,5 +100,8 @@ end-to-end check in a throwaway headless GNOME Shell.
 
 ## Privacy
 
-Text recognition and QR scanning run entirely on your computer. The Google Lens button
-uploads the selected area to Google, and only when you click it.
+Text recognition and QR scanning run entirely on your computer. Nothing is kept unless you
+press Enter; then the image is saved to your Pictures folder and the memory log is written to
+`~/.local/share/screenvision/memories/`, readable only by you. *Settings → General → Memory*
+turns remembering off and has a **Forget All** button. Google Lens uploads the selection to
+Google, and only when you choose it.

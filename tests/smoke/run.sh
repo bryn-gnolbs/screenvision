@@ -25,6 +25,14 @@ mkdir -p "$EXT_DIR/screenvision@genolabs.net" "$EXT_DIR/ssv-smoke-driver@test"
 unzip -q "$ZIP" -d "$EXT_DIR/screenvision@genolabs.net"
 cp "$PROJECT"/tests/smoke/driver/* "$EXT_DIR/ssv-smoke-driver@test/"
 cp "$PROJECT"/tests/fixtures/qr-codes.png "$EXT_DIR/ssv-smoke-driver@test/"
+# The driver reads the memory log through the extension's own module.
+mkdir -p "$EXT_DIR/ssv-smoke-driver@test/lib"
+cp "$PROJECT"/lib/memory.js "$PROJECT"/lib/intents.js "$EXT_DIR/ssv-smoke-driver@test/lib/"
+
+# Pictures must point into the sandbox: "Remember" saves screenshots there,
+# and nothing may land in the real ~/Pictures.
+mkdir -p "$XDG_CONFIG_HOME" "$OUT/Pictures"
+echo "XDG_PICTURES_DIR=\"$OUT/Pictures\"" > "$XDG_CONFIG_HOME/user-dirs.dirs"
 unset WAYLAND_DISPLAY DISPLAY
 
 timeout 120 dbus-run-session -- bash -c '

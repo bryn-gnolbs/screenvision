@@ -93,6 +93,28 @@ bubble.show(); bubble.hide();
 `stream()` exists for the assistant: when a language model answers, its tokens
 are passed straight to `stream()` and appear exactly like today's text.
 
+## The pill (`ui/pill.js`)
+
+The overlay's only fixed controls, centred at the bottom of the primary
+monitor, in the same glass style as the bubble:
+
+```
+╭────────────────────────────────────────────────────────────────╮
+│ ⤢ Whole screen   Drag to select · ↵ Remember · Esc to close   ✕ │
+╰────────────────────────────────────────────────────────────────╯
+```
+
+- Holds only what cannot live in the bubble. Everything about *what* is selected
+  belongs in the bubble.
+- Fades to low opacity when the selection runs underneath it, so the user's work
+  is never covered.
+
+## Keys
+
+Enter always does what the first (blue) chip does: **Remember**. Ctrl+C copies.
+Esc closes. Keep this consistent everywhere: the primary chip and Enter are the
+same action.
+
 ## Writing style
 
 - Plain words, no jargon, no exclamation marks.

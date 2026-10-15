@@ -10,6 +10,7 @@ import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -19,8 +20,10 @@ import {captureScreen, captureSelection, isSelectionMode} from './capture.js';
 import {buildSearchUrl, clamp, logError, parseRgbaSetting} from './lib/common.js';
 import {suggestActions} from './lib/intents.js';
 import {describeSelection} from './lib/narration.js';
+import {makeEntry, MemoryStore} from './lib/memory.js';
 import {hasLettersOrDigits} from './lib/ocrText.js';
 import {ScreenContext} from './lib/screenContext.js';
+import {saveScreenshot} from './lib/screenshotFile.js';
 import {scanCodes} from './lib/vision/codes.js';
 import {createProvider} from './lib/vision/index.js';
 import {wordsToStage} from './lib/vision/provider.js';
@@ -38,6 +41,8 @@ const DEFAULT_STYLE = {
 };
 
 const MAX_ACTIONS = 5;
+// Pause after "Remembered" before the overlay closes.
+const CONFIRM_BEFORE_CLOSE_MS = 650;
 // How long the selection must rest before the bubble streams its text.
 const SETTLE_MS = 400;
 // How long a stand-alone message stays up.
@@ -111,10 +116,14 @@ export class LiveVisionController {
      * @param {Gio.Settings} settings - extension settings
      * @param {object} hooks
      * @param {function(): void} hooks.searchWithLens - sends the selection to Google Lens
+     * @param {function(): object|null} [hooks.avoidRect] - screen area the bubble must not cover
      */
-    constructor(settings, {searchWithLens}) {
+    constructor(settings, {searchWithLens, avoidRect = () => null}) {
         this._settings = settings;
         this._searchWithLens = searchWithLens;
+        this._avoidRect = avoidRect;
+        this._memory = new MemoryStore();
+        this._source = null;
         this._overlay = null;
         this._bubbleLayer = null;
         this._bubble = null;
@@ -192,7 +201,7 @@ export class LiveVisionController {
         this._bubble.say({headline: text});
         this._bubble.setActions([]);
         this._bubble.show();
-        const hud = getHudRect();
+        const hud = this._avoidRect();
         const [, width] = this._bubble.get_preferred_width(-1);
         const [, height] = this._bubble.get_preferred_height(width);
         this._bubble.set_position(
@@ -208,6 +217,7 @@ export class LiveVisionController {
 
     /** Called each time the screenshot UI opens. */
     onOpened(ui) {
+        this._source = focusedWindowInfo();
         this._ensureAttached(ui);
         this.reset();
         this._warnedUnavailable = false;
@@ -284,16 +294,24 @@ export class LiveVisionController {
                 return;
 
             const {png, resizeScale} = this._prepareForOcr(capture);
-            const words = await this._provider.recognize(png, {
-                languages: this._config.languages,
-                minConfidence: this._config.confidence,
-                cancellable,
-            });
+            // Small QR codes read better close up, so scan the selection too.
+            const [words, codes] = await Promise.all([
+                this._provider.recognize(png, {
+                    languages: this._config.languages,
+                    minConfidence: this._config.confidence,
+                    cancellable,
+                }),
+                scanCodes(capture.png, {cancellable}),
+            ]);
             if (cancellable.is_cancelled())
                 return;
 
             this._context.setRefined(selection, wordsToStage(words, {
                 scale: ui._scale * resizeScale,
+                offsetX: selection.x,
+                offsetY: selection.y,
+            }), wordsToStage(codes, {
+                scale: ui._scale,
                 offsetX: selection.x,
                 offsetY: selection.y,
             }));
@@ -365,6 +383,58 @@ export class LiveVisionController {
             if (this._screenCancellable === cancellable)
                 this._screenCancellable = null;
         }
+    }
+
+    /**
+     * Enter: keep this moment. Saves the selection to ~/Pictures/Screenshots
+     * and, unless turned off, adds what was seen to the memory log for the
+     * assistant. The clipboard is left alone.
+     */
+    async remember(ui) {
+        const selection = this._getSelection(ui);
+        const capture = selection ? await captureSelection(ui) : null;
+        if (!capture) {
+            this.flash(_('Select something to remember'));
+            return;
+        }
+
+        try {
+            const image = await saveScreenshot(capture.png);
+            if (this._config.remember) {
+                await this._memory.remember(makeEntry({
+                    ...this._selected,
+                    image,
+                    source: this._source,
+                    rect: selection,
+                }));
+            }
+            this.flash(this._config.remember ? _('Remembered') : _('Saved to Screenshots'));
+        } catch (e) {
+            logError('Remembering failed', e);
+            this.flash(_('Could not save: %s').format(e.message));
+            return;
+        }
+
+        // Let the confirmation register before the overlay goes away.
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONFIRM_BEFORE_CLOSE_MS, () => {
+            ui.close();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    /** Ctrl+C: copy the selected text, or the image if there is no text. */
+    async copySelection(ui) {
+        if (this._selected.text) {
+            this._copy(this._selected.text, _('Text copied'), this._config.closeAfterCopy);
+            return;
+        }
+
+        const capture = this._getSelection(ui) ? await captureSelection(ui) : null;
+        if (!capture)
+            return;
+        St.Clipboard.get_default().set_content(St.ClipboardType.CLIPBOARD, 'image/png',
+            new GLib.Bytes(capture.png));
+        this.flash(_('Image copied'));
     }
 
     _checkAvailable() {
@@ -440,12 +510,16 @@ export class LiveVisionController {
         const reading = this._context.status === 'reading' && this._selected.words.length === 0;
         const narration = describeSelection(this._selected, {reading, _});
 
-        this._bubble.setActions(suggestActions(this._selected)
-            .slice(0, MAX_ACTIONS)
-            .map(suggestion => ({
-                label: this._labelFor(suggestion),
-                onActivate: () => this._runAction(suggestion),
-            })));
+        // "Remember" always comes first: it is what Enter does.
+        this._bubble.setActions([
+            {label: _('Remember'), onActivate: () => this.remember(Main.screenshotUI).catch(e => logError('Remembering failed', e))},
+            ...suggestActions(this._selected)
+                .slice(0, MAX_ACTIONS - 1)
+                .map(suggestion => ({
+                    label: this._labelFor(suggestion),
+                    onActivate: () => this._runAction(suggestion),
+                })),
+        ]);
 
         const key = `${narration.headline}\n${narration.body}`;
         if (narration.thinking) {
@@ -464,7 +538,7 @@ export class LiveVisionController {
         }
 
         this._bubble.show();
-        this._bubble.placeNear(selection, getHudRect());
+        this._bubble.placeNear(selection, this._avoidRect());
         this._raiseBubble();
     }
 
@@ -569,6 +643,7 @@ export class LiveVisionController {
         this._config = {
             enabled: s.get_boolean('ocr-enabled'),
             readWholeScreen: s.get_boolean('read-whole-screen'),
+            remember: s.get_boolean('remember-enabled'),
             confidence: clamp(s.get_int('selection-confidence'), 0, 99),
             maxEdge: clamp(s.get_int('selection-max-edge'), 800, 4096),
             languages: s.get_strv('ocr-languages'),
@@ -578,19 +653,6 @@ export class LiveVisionController {
     }
 }
 
-function getHudRect() {
-    const panel = Main.screenshotUI?._panel;
-    if (!panel?.visible)
-        return null;
-
-    const extents = panel.get_transformed_extents();
-    return {
-        x: extents.get_x(),
-        y: extents.get_y(),
-        width: extents.get_width(),
-        height: extents.get_height(),
-    };
-}
 
 function roundedRect(cr, x, y, width, height, radius) {
     cr.newSubPath();
@@ -599,4 +661,13 @@ function roundedRect(cr, x, y, width, height, radius) {
     cr.arc(x + radius, y + height - radius, radius, Math.PI / 2, Math.PI);
     cr.arc(x + radius, y + radius, radius, Math.PI, Math.PI * 3 / 2);
     cr.closePath();
+}
+
+/** App name and window title of the window that had focus, or null. */
+function focusedWindowInfo() {
+    const window = global.display.focus_window;
+    if (!window)
+        return null;
+    const app = Shell.WindowTracker.get_default().get_window_app(window);
+    return {app: app?.get_name() ?? window.get_wm_class() ?? '', title: window.get_title() ?? ''};
 }

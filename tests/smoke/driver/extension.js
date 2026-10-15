@@ -12,6 +12,8 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+import {MemoryStore} from './lib/memory.js';
+
 const UUID = 'screenvision@genolabs.net';
 const OUT_DIR = GLib.getenv('SSV_SMOKE_OUT');
 const SAMPLE_TEXT = 'ScreenVision reads this 2026';
@@ -104,8 +106,9 @@ async function run() {
     check('text is live while dragging', live()._selected.text === SAMPLE_TEXT, live()._selected.text);
     check('bubble shown while dragging', live()._bubble.visible, live()._bubble.headlineText);
     check('bubble holds text back while moving', live()._bubble.bodyText === '', live()._bubble.bodyText);
-    check('suggestions offer copy, search and lens',
-        ['Copy', 'Search', 'Lens'].every(l => menuLabels(live()).includes(l)), menuLabels(live()));
+    check('Remember comes first, then copy, search and lens',
+        JSON.stringify(menuLabels(live())) === '["Remember","Copy","Search","Lens"]', menuLabels(live()));
+    check('stock toolbar hidden, pill shown', !ui._panel.visible && !ui._closeButton.visible && ext()._pill.visible);
 
     // Resting: after a moment the bubble says what it sees, streaming the text.
     // Settles after 400 ms; capture just after the text starts streaming in.
@@ -123,18 +126,17 @@ async function run() {
         await sleep(100);
     check('sharper read after release', live().context.hasRefined(live().selectionRect(ui)) &&
         live()._selected.text === SAMPLE_TEXT, live()._selected.text);
-    check('lens button shown', ext()._lensButton.visible);
-    check('qr button in side column', ext()._qrButton.get_parent() === ext()._sideBox);
     await saveScreenshot('live-text.png');
 
-    await ext()._scanQrCode(ui);
-    check('qr reports no code in the bubble', live()._bubble._headline.text === 'No QR code found in the selection',
-        live()._bubble._headline.text);
+    // Stock mode keys are blocked: "c" would have switched to screen mode.
+    await pressKeys([Clutter.KEY_c]);
+    check('stock mode keys are blocked', ui._selectionButton.checked);
 
-    live()._runAction({kind: 'copy-text', value: live()._selected.text});
+    // Ctrl+C copies the selected text.
+    await pressKeys([Clutter.KEY_Control_L, Clutter.KEY_c]);
     const clip = await new Promise(resolve =>
         St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, text) => resolve(text)));
-    check('copy puts text on clipboard', clip === SAMPLE_TEXT, clip);
+    check('Ctrl+C copies the text', clip === SAMPLE_TEXT, clip);
 
     // QR codes are found automatically and turned into suggestions.
     moveSelection(ui, 290, 550, 940, 830);
@@ -148,17 +150,49 @@ async function run() {
         live()._bubble.headlineText);
     await saveScreenshot('bubble-qr.png');
 
+    // The pill fades back while the selection runs underneath it.
+    moveSelection(ui, 500, 600, 1100, 899);
+    await sleep(400);
+    check('pill fades when the selection runs under it', ext()._pill.opacity < 255, ext()._pill.opacity);
+    moveSelection(ui, 290, 550, 940, 760);
+    await sleep(400);
+    check('pill returns when the selection moves away', ext()._pill.opacity === 255, ext()._pill.opacity);
+
+    // "Whole screen" in the pill selects the entire monitor.
+    ext()._selectWholeScreen(ui);
+    const monitor = Main.layoutManager.primaryMonitor;
+    const whole = live().selectionRect(ui);
+    check('Whole screen selects the monitor', whole.width >= monitor.width - 1 && whole.height >= monitor.height - 1,
+        whole);
+
+    // Enter: remember the text selection - image saved, memory written, overlay closes.
+    moveSelection(ui, 280, 280, 1200, 420);
+    await sleep(100);
+    await pressKeys([Clutter.KEY_Return]);
+    for (let i = 0; i < 30 && ui.visible; i++)
+        await sleep(100);
+    const memories = await new MemoryStore().list();
+    const last = memories.at(-1);
+    check('Enter remembers what was selected', memories.length === 1 && last.text === SAMPLE_TEXT, last?.text);
+    check('remembered image saved to Pictures/Screenshots',
+        last?.image?.includes('/Pictures/Screenshots/') && GLib.file_test(last.image, GLib.FileTest.EXISTS), last?.image);
+    check('overlay closes after remembering', !ui.visible);
+
+    // Recording mode gets GNOME's own interface back.
+    await ui.open();
+    ui._castButton.checked = true;
+    check('recording mode shows the stock toolbar', ui._panel.visible && !ext()._pill.visible);
+    ui._castButton.checked = false;
+    check('screenshot mode hides it again', !ui._panel.visible && ext()._pill.visible);
+    await saveScreenshot('overlay.png');
+
     ui.close();
     await sleep(800);
 
-    const panelRows = () => ui._panel.get_children().map(child =>
-        child === ui._typeButtonContainer ? 'type' : child === ui._bottomRowContainer ? 'bottom' : 'other');
-
     Main.extensionManager.disableExtension(UUID);
     await sleep(500);
-    check('disable restores toolbar', JSON.stringify(panelRows()) === '["type","bottom"]', panelRows());
+    check('disable restores the stock toolbar', ui._panel.visible && ui._closeButton.visible);
     check('disable restores open()', !Object.hasOwn(ui, 'open') || ui.open === Object.getPrototypeOf(ui).open);
-    check('disable removes lens button', ui._showPointerButtonContainer.get_n_children() === 1);
 
     Main.extensionManager.enableExtension(UUID);
     await sleep(500);
@@ -198,11 +232,6 @@ async function run() {
     Main.extensionManager.enableExtension(UUID);
     await sleep(300);
     settings.reset('screenshot-shortcut');
-
-    ext()._settings.set_boolean('show-qr-button', false);
-    check('hiding qr restores toolbar', JSON.stringify(panelRows()) === '["type","bottom"]', panelRows());
-    ext()._settings.set_boolean('show-qr-button', true);
-    check('showing qr wraps toolbar', JSON.stringify(panelRows()) === '["other"]', panelRows());
 }
 
 // GNOME briefly disables and re-enables extensions loaded after one that is

@@ -37,6 +37,11 @@
       <summary>Enable OCR highlighting</summary>
       <description>Enable OCR processing and highlight rendering in the screenshot UI.</description>
     </key>
+    <key name="remember-enabled" type="b">
+      <default>true</default>
+      <summary>Remember with Enter</summary>
+      <description>When Enter is pressed in the overlay, add what was selected (text, links, codes, source window and the saved image path) to a private local memory log for the assistant.</description>
+    </key>
     <key name="read-whole-screen" type="b">
       <default>true</default>
       <summary>Read the whole screen</summary>
@@ -66,16 +71,6 @@
       <default>'google'</default>
       <summary>Search engine</summary>
       <description>The search engine to use for the OCR 'Search' button.</description>
-    </key>
-    <key name="show-google-lens-button" type="b">
-      <default>true</default>
-      <summary>Show Google Lens button</summary>
-      <description>Show the Google Lens button in the screenshot UI.</description>
-    </key>
-    <key name="show-qr-button" type="b">
-      <default>true</default>
-      <summary>Show QR code button</summary>
-      <description>Show the QR code button in the screenshot UI.</description>
     </key>
     <key name="screenshot-shortcut" type="as">
       <default>['Print']</default>

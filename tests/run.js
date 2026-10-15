@@ -1,6 +1,7 @@
 // Unit tests for the shell-independent helpers. Run with `make test`
 // (or `gjs -m tests/run.js`). Exits non-zero if any test fails.
 
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import System from 'system';
 
@@ -16,6 +17,8 @@ import {ScreenContext} from '../lib/screenContext.js';
 import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
 import {describeSelection, shorten, fill} from '../lib/narration.js';
 import {renderTokens, tokenize} from '../ui/textReveal.js';
+import {MemoryStore, makeEntry} from '../lib/memory.js';
+import {saveScreenshot, screenshotBaseName} from '../lib/screenshotFile.js';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import {dropLonelyFragments, hasLettersOrDigits, isPlausibleWord, parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
@@ -336,6 +339,48 @@ test('dropLonelyFragments removes unsure short words alone on a line', () => {
         w('a', 91, 'l1'), w('wit', 70, 'l2'), w('OK', 96, 'l3'), w('Cancel', 60, 'l4'),
         w('on', 50, 'l5'), w('time', 96, 'l5'),
     ]).map(x => x.text), ['OK', 'Cancel', 'on', 'time']);
+});
+
+test('makeEntry collects links, emails and codes from what was seen', () => {
+    const entry = makeEntry({
+        text: 'Docs at https://example.com/docs, mail team@example.org',
+        codes: [{type: 'QR-Code', data: 'https://qr.example/x', x: 1}],
+        source: {app: 'Firefox', title: 'Docs'},
+        rect: {x: 1.4, y: 2.6, width: 10, height: 20},
+        time: new Date('2026-10-15T10:00:00Z'),
+    });
+    assertEqual([entry.links, entry.emails, entry.codes, entry.rect, entry.time], [
+        ['https://qr.example/x', 'https://example.com/docs'], ['team@example.org'],
+        [{type: 'QR-Code', data: 'https://qr.example/x'}], {x: 1, y: 3, width: 10, height: 20},
+        '2026-10-15T10:00:00.000Z',
+    ]);
+});
+
+test('MemoryStore appends privately, lists and forgets', async () => {
+    const dir = GLib.dir_make_tmp('sv-memory-XXXXXX');
+    const store = new MemoryStore(GLib.build_filenamev([dir, 'memories']));
+    assertEqual(await store.list(), []);
+    await store.remember(makeEntry({text: 'first'}));
+    await store.remember(makeEntry({text: 'second'}));
+    assertEqual((await store.list()).map(e => e.text), ['first', 'second']);
+
+    const info = Gio.File.new_for_path(GLib.build_filenamev([store.directory, 'entries.jsonl']))
+        .query_info('unix::mode', Gio.FileQueryInfoFlags.NONE, null);
+    assertEqual((info.get_attribute_uint32('unix::mode') & 0o777).toString(8), '600');
+
+    store.forgetAll();
+    assertEqual(await store.list(), []);
+});
+
+test('saveScreenshot uses GNOME naming and never overwrites', async () => {
+    const dir = GLib.dir_make_tmp('sv-shots-XXXXXX');
+    const time = new Date(2026, 9, 15, 18, 22, 1);
+    assertEqual(screenshotBaseName(time), 'Screenshot From 2026-10-15 18-22-01');
+    const first = await saveScreenshot(new Uint8Array([1, 2, 3]), {dir, time});
+    const second = await saveScreenshot(new Uint8Array([4]), {dir, time});
+    assertEqual([GLib.path_get_basename(first), GLib.path_get_basename(second)],
+        ['Screenshot From 2026-10-15 18-22-01.png', 'Screenshot From 2026-10-15 18-22-01 - 2.png']);
+    assertEqual([...GLib.file_get_contents(first)[1]], [1, 2, 3]);
 });
 
 const loop = new GLib.MainLoop(null, false);

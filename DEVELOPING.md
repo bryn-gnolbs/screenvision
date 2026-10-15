@@ -56,6 +56,9 @@ lib/intents.js    Suggested actions for a selection (open link, Wi-Fi password, 
 lib/narration.js  What the bubble says about a selection (headline + text)
 ui/bubble.js      The assistant's voice: streaming text bubble with action chips (see DESIGN.md)
 ui/textReveal.js  Word-by-word fade-in rendering for the bubble (unit-tested)
+ui/pill.js        The slim bottom pill: Whole screen, hint, close
+lib/memory.js     Private memory log written by Enter (JSON Lines, owner-only)
+lib/screenshotFile.js  Saving to ~/Pictures/Screenshots with GNOME's file names
 lib/ocrText.js    Pure TSV → words → text logic (unit-tested)
 lib/shortcutKeys.js  Key press → shortcut string for the prefs picker (GTK, unit-tested)
 stylesheet.css    St widget styling (loaded automatically by the shell)
@@ -113,10 +116,15 @@ gresource extract /usr/lib/gnome-shell/libshell-*.so /org/gnome/shell/ui/screens
 We rely on these internals (underscore = private, so they can change between GNOME
 versions; check them when adding a new version to `metadata.json`):
 
-- `open()`: wrapped with `InjectionManager` to start OCR when the tool opens
-- `_areaSelector._updateSelectionRect()` and its `drag-ended` signal: follow the selection
+- `open()`: wrapped with `InjectionManager` to switch interface and start reading the screen
+- `_areaSelector._updateSelectionRect()` (plus `_startX/_startY/_lastX/_lastY`) and its
+  `drag-ended` signal: follow and set the selection
 - `_getSelectedGeometry()`, `_stageScreenshot`, `_scale`: read the selected pixels
-- `_panel`, `_typeButtonContainer`, `_bottomRowContainer`, `_showPointerButtonContainer`: toolbar layout
+- `_panel`, `_closeButton`: the stock toolbar, hidden in screenshot mode
+- `_castButton`: checked in recording mode, where ScreenVision steps aside
+- `_selectionButton`: forced on in screenshot mode
+- the `key-press-event` signal: handled before the class's own key handler, so Enter,
+  Ctrl+C and the stock mode keys (Space, C, W, V, P) are ScreenVision's
 
 ## Day-to-day workflow
 
