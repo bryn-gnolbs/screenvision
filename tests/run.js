@@ -7,7 +7,7 @@ import System from 'system';
 import {
     buildSearchUrl, deleteFile, parseRgbaSetting, runCommand, writePrivateTempFile,
 } from '../lib/common.js';
-import {normalizeLanguageSelection, parseTesseractLanguages, TesseractProvider} from '../lib/vision/tesseract.js';
+import {normalizeLanguageSelection, parseTesseractLanguages, TesseractProvider, trustworthySparseWords} from '../lib/vision/tesseract.js';
 import {createProvider, listProviderIds} from '../lib/vision/index.js';
 import {wordsToStage} from '../lib/vision/provider.js';
 import {planBands, mergeBandWords, recognizeInBands, chooseBandCount} from '../lib/vision/tiling.js';
@@ -17,7 +17,7 @@ import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
 import {describeSelection, shorten, fill} from '../lib/narration.js';
 import {renderTokens, tokenize} from '../ui/textReveal.js';
 import GdkPixbuf from 'gi://GdkPixbuf';
-import {hasLettersOrDigits, parseTsv, wordsToText} from '../lib/ocrText.js';
+import {dropLonelyFragments, hasLettersOrDigits, isPlausibleWord, parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
 import {LensLauncher} from '../uploader.js';
 import Soup from 'gi://Soup?version=3.0';
@@ -46,7 +46,7 @@ test('parseTsv keeps confident words and maps to stage coordinates', () => {
     ].join('\n');
 
     const words = parseTsv(tsv, {scale: 2, offsetX: 10, offsetY: 20, minConfidence: 10});
-    assertEqual(words, [{x: 60, y: 45, width: 20, height: 10, text: 'Hello', lineKey: '1:1:1:1'}]);
+    assertEqual(words, [{x: 60, y: 45, width: 20, height: 10, text: 'Hello', confidence: 96, lineKey: '1:1:1:1'}]);
 });
 
 test('wordsToText joins words per Tesseract line', () => {
@@ -304,6 +304,38 @@ test('tokenize keeps spacing and renderTokens fades words in order', () => {
     assertEqual(renderTokens(tokens, 50, 100), {markup: '<span alpha="50%">a&lt;b </span>', done: false});
     assertEqual(renderTokens(tokens, 200, 100), {markup: 'a&lt;b c', done: true});
     assertEqual(renderTokens(tokens, 0, 0), {markup: 'a&lt;b ', done: false});
+});
+
+test('isPlausibleWord rejects OCR noise but keeps real words', () => {
+    assertEqual(['SS', 'Zz', 'sss', '=', '——a', 'a', 'Hi', '000', 'Zs', 'OK'].map(text => isPlausibleWord({text})),
+        [false, false, false, false, true, true, true, true, true, true]);
+});
+
+test('trustworthySparseWords needs every word and the average to be confident', () => {
+    const w = confidence => ({text: 'x', confidence});
+    assertEqual(trustworthySparseWords([w(90), w(80), w(40)]).length, 2);
+    assertEqual(trustworthySparseWords([w(62), w(65)]).length, 0);
+    assertEqual(trustworthySparseWords([w(30)]).length, 0);
+});
+
+test('a text-free landscape photo yields no words (skipped without tesseract)', async () => {
+    const provider = new TesseractProvider();
+    if (!provider.isAvailable())
+        return;
+    await provider.prepare();
+    const [, png] = GLib.file_get_contents(fixture('landscape.png'));
+    const words = await provider.recognize(png, {languages: ['eng'], minConfidence: 10});
+    assertEqual(words.map(word => word.text), []);
+    const adaptive = await provider.recognize(png, {languages: ['eng'], minConfidence: 50, adaptiveThreshold: true});
+    assertEqual(adaptive.map(word => word.text), []);
+});
+
+test('dropLonelyFragments removes unsure short words alone on a line', () => {
+    const w = (text, confidence, lineKey) => ({text, confidence, lineKey});
+    assertEqual(dropLonelyFragments([
+        w('a', 91, 'l1'), w('wit', 70, 'l2'), w('OK', 96, 'l3'), w('Cancel', 60, 'l4'),
+        w('on', 50, 'l5'), w('time', 96, 'l5'),
+    ]).map(x => x.text), ['OK', 'Cancel', 'on', 'time']);
 });
 
 const loop = new GLib.MainLoop(null, false);
