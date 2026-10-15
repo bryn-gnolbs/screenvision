@@ -29,10 +29,23 @@ export default [
             globals: gjsGlobals,
         },
         rules: {
-            'indent': ['error', 4, {SwitchCase: 0, ignoredNodes: ['TemplateLiteral *']}],
+            'indent': ['error', 4, {
+                SwitchCase: 0,
+                ignoredNodes: [
+                    'TemplateLiteral *',
+                    // GNOME style: the class inside GObject.registerClass() is not indented.
+                    'CallExpression[callee.object.name=GObject][callee.property.name=registerClass] > ClassExpression:first-child',
+                ],
+            }],
             'quotes': ['error', 'single', {avoidEscape: true}],
             'semi': ['error', 'always'],
-            'comma-dangle': ['error', 'always-multiline'],
+            'comma-dangle': ['error', {
+                arrays: 'always-multiline',
+                objects: 'always-multiline',
+                imports: 'always-multiline',
+                exports: 'always-multiline',
+                functions: 'never',
+            }],
             'eqeqeq': ['error', 'always'],
             'no-unused-vars': ['error', {argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none'}],
             'prefer-const': 'error',
