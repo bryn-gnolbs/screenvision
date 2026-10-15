@@ -29,8 +29,15 @@ const MAX_WIDTH = 440;
 const CARD_PADDING_X = 32;
 const CHIP_SPACING = 8;
 
+// Each extension that carries a copy of this file must give it its own type
+// name: GNOME registers classes globally, and two extensions registering the
+// same name make the second one fail to load. This line differs per copy.
+const TYPE_NAME = 'ScreenVisionAgentBubble';
+
 export const AgentBubble = GObject.registerClass(
 class AgentBubble extends St.BoxLayout {
+    static [GObject.GTypeName] = TYPE_NAME;
+
     _init() {
         super._init({
             style_class: 'sv-bubble',
