@@ -44,7 +44,7 @@ A field guide for people who know Python but are new to GNOME Shell extensions.
 extension.js      Entry point: hooks the screenshot UI, adds the Lens and QR buttons, toasts
 ocr.js            OCR controller: runs Tesseract, draws highlight boxes, Copy/Search menu
 capture.js        Grabs the selected area from the screenshot UI's frozen frame as PNG
-uploader.js       Google Lens upload over HTTPS (returns the results URL)
+uploader.js       Google Lens hand-off: one-time 127.0.0.1 page that makes the browser upload
 shortcut.js       Optional extra keyboard shortcut that opens the screenshot tool
 prefs.js          Preferences window (separate GTK process)
 lib/common.js     Shared helpers: subprocesses, temp files, Tesseract languages, settings parsing

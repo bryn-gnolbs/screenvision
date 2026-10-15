@@ -10,6 +10,8 @@ import {
 } from '../lib/common.js';
 import {parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
+import {LensLauncher} from '../uploader.js';
+import Soup from 'gi://Soup?version=3.0';
 import Gdk from 'gi://Gdk?version=4.0';
 
 const tests = [];
@@ -109,6 +111,50 @@ test('interpretKeyPress handles waiting, cancelling and typing keys', () => {
     assertEqual(interpretKeyPress(Gdk.KEY_BackSpace, 0, 0), {action: 'disable'});
     assertEqual(interpretKeyPress(Gdk.KEY_s, 0, 0), {action: 'reject', reason: 'needs-modifier'});
     assertEqual(interpretKeyPress(Gdk.KEY_S, 0, SHIFT_MASK), {action: 'reject', reason: 'needs-modifier'});
+});
+
+async function httpGet(session, url) {
+    const message = Soup.Message.new('GET', url);
+    const body = await new Promise((resolve, reject) => {
+        session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (_s, result) => {
+            try {
+                resolve(session.send_and_read_finish(result).toArray());
+            } catch (e) {
+                reject(e);
+            }
+        });
+    });
+    return {status: message.get_status(), body, headers: message.get_response_headers()};
+}
+
+const wait = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+    resolve();
+    return GLib.SOURCE_REMOVE;
+}));
+
+test('Lens hand-off serves the page and exact image, then shuts down', async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
+    const launcher = new LensLauncher();
+    const url = launcher.serve(png, 640, 480);
+    const session = new Soup.Session();
+
+    if (!/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]{36}\/$/.test(url))
+        throw new Error(`unexpected URL ${url}`);
+
+    const page = await httpGet(session, url);
+    const html = new TextDecoder().decode(page.body);
+    assertEqual([page.status, html.includes('name="encoded_image"'), html.includes('value="640,480"'),
+        page.headers.get_one('Referrer-Policy')], [200, true, true, 'no-referrer']);
+
+    const wrongToken = await httpGet(session, url.replace(/[0-9a-f-]{36}/, GLib.uuid_string_random()));
+    assertEqual(wrongToken.status, 404);
+
+    const image = await httpGet(session, `${url}image.png`);
+    assertEqual([image.status, [...image.body]], [200, [...png]]);
+
+    await wait(5500);
+    assertEqual(launcher._handoffs.size, 0);
+    launcher.destroy();
 });
 
 const loop = new GLib.MainLoop(null, false);

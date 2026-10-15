@@ -16,7 +16,7 @@ import {
 import {captureSelection, isSelectionMode} from './capture.js';
 import {ScreenshotOCRController} from './ocr.js';
 import {ScreenshotShortcut} from './shortcut.js';
-import {LensUploader} from './uploader.js';
+import {LensLauncher} from './uploader.js';
 import {
     deleteFile, hasProgram, logError, runCommand, writePrivateTempFile,
 } from './lib/common.js';
@@ -70,7 +70,7 @@ export default class SmartScreenVisionExtension extends Extension {
 
         this._settings = this.getSettings();
         this._injections = new InjectionManager();
-        this._uploader = new LensUploader();
+        this._lens = new LensLauncher();
         this._ocr = new ScreenshotOCRController(this._settings, text => this._showToast(text));
         this._shortcut = new ScreenshotShortcut(this._settings);
         this._toast = null;
@@ -115,8 +115,8 @@ export default class SmartScreenVisionExtension extends Extension {
 
         this._ocr.destroy();
         this._ocr = null;
-        this._uploader.destroy();
-        this._uploader = null;
+        this._lens.destroy();
+        this._lens = null;
         this._settings = null;
     }
 
@@ -269,15 +269,15 @@ export default class SmartScreenVisionExtension extends Extension {
             return;
 
         ui.close();
-        Main.notify(_('ScreenVision'), _('Sending image to Google Lens…'));
 
+        // The browser does the upload itself (see uploader.js).
         try {
-            const url = await this._uploader.upload(capture.png,
+            const url = this._lens.serve(capture.png,
                 capture.pixbuf.get_width(), capture.pixbuf.get_height());
             Gio.AppInfo.launch_default_for_uri(url, null);
         } catch (e) {
-            logError('Google Lens upload failed', e);
-            Main.notify(_('ScreenVision'), _('Google Lens search failed: %s').format(e.message));
+            logError('Google Lens hand-off failed', e);
+            Main.notify(_('ScreenVision'), _('Could not open Google Lens: %s').format(e.message));
         }
     }
 

@@ -19,8 +19,9 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
 
 ### Changes since Shotzy
 
-- Google Lens works with sandboxed browsers such as Ubuntu's Snap Firefox: the image is
-  uploaded directly and only the results link is opened. No HTML file is written to `/tmp`.
+- Google Lens works with sandboxed browsers such as Ubuntu's Snap Firefox. Instead of
+  a launcher file in `/tmp`, the extension serves a one-time page on `127.0.0.1` (random
+  address, stops once used) that makes your browser upload the image to Lens itself.
 - Screenshots are no longer written to world-readable `/tmp` under predictable names.
   OCR passes the image to Tesseract through a pipe, and QR scanning uses a private file in
   `$XDG_RUNTIME_DIR` that is deleted straight away.
