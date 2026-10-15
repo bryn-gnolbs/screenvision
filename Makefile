@@ -4,7 +4,7 @@ UUID := screenvision@genolabs.net
 ZIP := build/$(UUID).shell-extension.zip
 SOURCES := $(shell git ls-files --cached --others --exclude-standard '*.js' '*.css' '*.json' '*.xml' 2>/dev/null)
 
-.PHONY: help test lint smoke pack install uninstall enable disable prefs logs nested clean
+.PHONY: help test lint smoke smoke-together pack install uninstall enable disable prefs logs nested clean
 
 help:
 	@echo "make test      Run unit tests (plain gjs, no GNOME Shell needed)"
@@ -29,6 +29,11 @@ node_modules: package.json
 
 smoke: $(ZIP)
 	tests/smoke/run.sh
+
+# The same, with Spotlight (../Spotlight) loaded first: both carry the bubble.
+smoke-together: $(ZIP)
+	$(MAKE) -C ../Spotlight pack
+	SSV_SMOKE_WITH="$(abspath ../Spotlight/build/spotlight@genolabs.net.shell-extension.zip)" tests/smoke/run.sh
 
 $(ZIP): $(SOURCES) Makefile
 	@mkdir -p build
