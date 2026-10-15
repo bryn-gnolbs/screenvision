@@ -1,5 +1,15 @@
 # Changelog
 
+## 3 — Live Text selection (2026-10-16)
+
+- Select recognised words like text: the pointer becomes an I-beam over text, drag
+  selects words in reading order, double-click a word, triple-click a line. Pressing
+  anywhere else still draws or moves the area.
+- Selected words show as blue per-line bars; the bubble says "N words selected" and
+  Remember, Copy, Search, Lens and Ctrl+C act on just those words (Remember and Lens
+  capture the words' area).
+- Esc clears a text selection before closing the overlay.
+
 ## 2 — ScreenVision interface (2026-10-15)
 
 - New interface: the stock screenshot toolbar is replaced by the selection, the

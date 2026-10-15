@@ -17,6 +17,9 @@ import {ScreenContext} from '../lib/screenContext.js';
 import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
 import {describeSelection, shorten, fill} from '../lib/narration.js';
 import {renderTokens, tokenize} from '../ui/textReveal.js';
+import {
+    ClickCounter, boundingRect, lineHighlights, lineRange, nearestWord, selectedWords, wordAt,
+} from '../lib/textSelection.js';
 import {MemoryStore, makeEntry} from '../lib/memory.js';
 import {saveScreenshot, screenshotBaseName} from '../lib/screenshotFile.js';
 import GdkPixbuf from 'gi://GdkPixbuf';
@@ -381,6 +384,51 @@ test('saveScreenshot uses GNOME naming and never overwrites', async () => {
     assertEqual([GLib.path_get_basename(first), GLib.path_get_basename(second)],
         ['Screenshot From 2026-10-15 18-22-01.png', 'Screenshot From 2026-10-15 18-22-01 - 2.png']);
     assertEqual([...GLib.file_get_contents(first)[1]], [1, 2, 3]);
+});
+
+// Two lines: "Hello big world" / "second line".
+const SEL_WORDS = [
+    {x: 10, y: 10, width: 40, height: 12, text: 'Hello', lineKey: 'a'},
+    {x: 56, y: 10, width: 24, height: 12, text: 'big', lineKey: 'a'},
+    {x: 86, y: 11, width: 40, height: 12, text: 'world', lineKey: 'a'},
+    {x: 10, y: 30, width: 50, height: 12, text: 'second', lineKey: 'b'},
+    {x: 66, y: 30, width: 30, height: 12, text: 'line', lineKey: 'b'},
+];
+
+test('wordAt and nearestWord find words under and near the pointer', () => {
+    assertEqual([wordAt(SEL_WORDS, 60, 15), wordAt(SEL_WORDS, 52, 15), wordAt(SEL_WORDS, 200, 15)], [1, 0, -1]);
+    // Past the end of the first line, the nearest word is still on that line.
+    assertEqual(nearestWord(SEL_WORDS, 200, 16), 2);
+    assertEqual(nearestWord(SEL_WORDS, 0, 40), 3);
+    assertEqual(nearestWord([], 0, 0), -1);
+});
+
+test('selectedWords spans reading order in either direction', () => {
+    assertEqual(selectedWords(SEL_WORDS, {anchor: 1, focus: 3}).map(w => w.text), ['big', 'world', 'second']);
+    assertEqual(selectedWords(SEL_WORDS, {anchor: 3, focus: 1}).map(w => w.text), ['big', 'world', 'second']);
+    assertEqual(lineRange(SEL_WORDS, 1), [0, 2]);
+    assertEqual(lineRange(SEL_WORDS, 4), [3, 4]);
+});
+
+test('lineHighlights merges a line into one bar; boundingRect covers all', () => {
+    assertEqual(lineHighlights(SEL_WORDS.slice(1, 4)), [
+        {x: 56, y: 10, width: 70, height: 13}, {x: 10, y: 30, width: 50, height: 12},
+    ]);
+    assertEqual(boundingRect(SEL_WORDS), {x: 10, y: 10, width: 116, height: 32});
+    assertEqual(boundingRect([]), null);
+});
+
+test('ClickCounter recognises double and triple clicks', () => {
+    const c = new ClickCounter();
+    assertEqual([c.press(5, 5, 0), c.press(6, 5, 200), c.press(6, 6, 350), c.press(6, 6, 500)], [1, 2, 3, 3]);
+    assertEqual(c.press(6, 6, 2000), 1);
+    assertEqual(c.press(50, 6, 2100), 1);
+});
+
+test('describeSelection counts words for a text selection', () => {
+    assertEqual(describeSelection({text: 'reads this'}, {textSelection: true}).headline, '2 words selected');
+    assertEqual(describeSelection({text: 'see https://a.org/x'}, {textSelection: true}).headline,
+        '2 words selected · Link to a.org');
 });
 
 const loop = new GLib.MainLoop(null, false);

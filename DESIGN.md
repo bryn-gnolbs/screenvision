@@ -109,6 +109,21 @@ monitor, in the same glass style as the bubble:
 - Fades to low opacity when the selection runs underneath it, so the user's work
   is never covered.
 
+## Live Text selection
+
+Recognised words can be selected like text in a document, as in Apple's Live Text:
+
+- Over a recognised word the pointer becomes an I-beam. Pressing there and dragging
+  selects words in reading order; double-click selects a word, triple-click a line.
+  Pressing anywhere else (or on the area's edges and handles, or with Ctrl) draws or
+  moves the area as before.
+- Selected words are drawn as one rounded bar per line in system blue
+  (`rgba(10, 132, 255, 0.38)`), on top of the usual word boxes.
+- While words are selected they are the subject: the bubble says "2 words selected"
+  and every action (Remember, Copy, Search, Lens, Ctrl+C) uses them.
+- Esc clears the text selection first; a second Esc closes.
+- Selecting never touches the clipboard; only Copy / Ctrl+C do.
+
 ## Keys
 
 Enter always does what the first (blue) chip does: **Remember**. Ctrl+C copies.
