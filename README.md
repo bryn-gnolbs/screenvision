@@ -52,8 +52,11 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
 | Key | Does |
 |---|---|
 | Drag | Select an area; text and suggestions follow live |
+| Drag **on text** | Select words, Live Text style (the pointer becomes an I-beam over text) |
+| Double-click / triple-click on text | Select a word / a whole line |
+| **Esc** with words selected | Clear the text selection (Esc again closes) |
 | **Enter** | Remember: save the image and add what was selected to memory |
-| **Ctrl+C** | Copy the selected text (or the image if there is no text) |
+| **Ctrl+C** | Copy the selected words or text (or the image if there is no text) |
 | **Esc** | Close |
 
 ## Dependencies

@@ -17,7 +17,28 @@ export async function captureSelection(ui) {
     const geometry = ui._getSelectedGeometry(true);
     if (!geometry || geometry[2] <= 0 || geometry[3] <= 0)
         return null;
+    return captureGeometry(ui, geometry);
+}
 
+/**
+ * Encode any rectangle of the frozen frame (screen/stage coordinates) as a
+ * PNG, e.g. the area around a text selection.
+ *
+ * @param {object} ui - Main.screenshotUI
+ * @param {{x: number, y: number, width: number, height: number}} rect
+ * @returns {Promise<{pixbuf: object, png: Uint8Array}|null>}
+ */
+export function captureRect(ui, rect) {
+    if (!rect || rect.width <= 0 || rect.height <= 0)
+        return Promise.resolve(null);
+    const s = ui._scale;
+    return captureGeometry(ui, [
+        Math.round(rect.x * s), Math.round(rect.y * s),
+        Math.round(rect.width * s), Math.round(rect.height * s),
+    ]);
+}
+
+async function captureGeometry(ui, geometry) {
     const texture = ui._stageScreenshot?.get_content()?.get_texture();
     if (!texture)
         throw new Error('The screenshot UI has no frozen frame');

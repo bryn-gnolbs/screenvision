@@ -15,13 +15,18 @@ import {
     Extension, InjectionManager, gettext as _,
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {captureSelection} from './capture.js';
 import {LiveVisionController} from './live.js';
 import {ScreenshotShortcut} from './shortcut.js';
 import {LensLauncher} from './uploader.js';
 import {logError} from './lib/common.js';
 import {VisionPill} from './ui/pill.js';
 
+// Cursor types over the area's edges and corner handles: GNOME keeps those.
+const RESIZE_CURSORS = new Set([
+    Clutter.CursorType.NW_RESIZE, Clutter.CursorType.NE_RESIZE, Clutter.CursorType.SW_RESIZE,
+    Clutter.CursorType.SE_RESIZE, Clutter.CursorType.N_RESIZE, Clutter.CursorType.S_RESIZE,
+    Clutter.CursorType.E_RESIZE, Clutter.CursorType.W_RESIZE,
+]);
 const ENTER_KEYS = new Set([Clutter.KEY_Return, Clutter.KEY_KP_Enter, Clutter.KEY_ISO_Enter]);
 // Stock shortcuts for features ScreenVision replaces (Space captured, C/W
 // switched to screen/window mode, V to recording, P toggled the pointer).
@@ -114,6 +119,8 @@ export default class ScreenVisionExtension extends Extension {
                 };
             });
 
+            this._hookTextSelection(ui);
+
             // On release, read the selection again at full detail.
             ui._areaSelector.connectObject('drag-ended', () => {
                 if (self._isVisionMode(ui))
@@ -135,6 +142,78 @@ export default class ScreenVisionExtension extends Extension {
         // Runs before the stock key handler, so ScreenVision decides first.
         ui.connectObject('key-press-event', (_actor, event) => this._onKeyPress(ui, event), this);
         ui.connectObject('closed', () => live.reset(), this);
+    }
+
+    /**
+     * Live Text: share the pointer with GNOME's area selector. A press on a
+     * recognised word selects text; anywhere else (empty space, the
+     * selection's edges and corner handles, or with Ctrl held) GNOME draws or
+     * moves the area as before.
+     */
+    _hookTextSelection(ui) {
+        const live = this._live;
+        const self = this;
+        const selector = ui._areaSelector;
+
+        const claimsPoint = (x, y) => live.wordAtPoint(x, y) >= 0 &&
+            !RESIZE_CURSORS.has(selector._computeCursorType(x, y));
+
+        this._injections.overrideMethod(selector, '_onPress', original => {
+            return function (event, button, sequence) {
+                if (self._isVisionMode(ui) && button === Clutter.BUTTON_PRIMARY && !sequence &&
+                    !this._dragButton && !(event.get_state() & Clutter.ModifierType.CONTROL_MASK)) {
+                    const [x, y] = event.get_coords();
+                    if (claimsPoint(x, y)) {
+                        live.pointerPress(ui, x, y, event.get_time());
+                        return Clutter.EVENT_STOP;
+                    }
+                }
+                // GNOME takes this press: a new or moved area replaces any text selection.
+                live.clearTextSelection(ui, false);
+                return original.call(this, event, button, sequence);
+            };
+        });
+
+        this._injections.overrideMethod(selector, '_onMotion', original => {
+            return function (event, sequence) {
+                const [x, y] = event.get_coords();
+                if (live.isTextDragging) {
+                    live.pointerMotion(ui, x, y);
+                    return Clutter.EVENT_STOP;
+                }
+                if (self._isVisionMode(ui) && !sequence && !this._dragButton && claimsPoint(x, y)) {
+                    this.set_cursor_type(Clutter.CursorType.TEXT);
+                    return Clutter.EVENT_STOP;
+                }
+                return original.call(this, event, sequence);
+            };
+        });
+
+        // Esc clears a text selection first; a second Esc closes as usual.
+        // GNOME's grab helper turns Esc into ungrab({isUser: true}), which
+        // closes the overlay; with a text selection, clear it instead.
+        if (ui._grabHelper) {
+            this._injections.overrideMethod(ui._grabHelper, 'ungrab', original => {
+                return function (params = {}) {
+                    if (params.isUser && !params.actor && ui.visible &&
+                        self._isVisionMode(ui) && live.hasTextSelection) {
+                        live.clearTextSelection(ui);
+                        return;
+                    }
+                    return original.call(this, params);
+                };
+            });
+        }
+
+        this._injections.overrideMethod(selector, '_onRelease', original => {
+            return function (event, button, sequence) {
+                if (live.isTextDragging && button === Clutter.BUTTON_PRIMARY) {
+                    live.pointerRelease(ui);
+                    return Clutter.EVENT_STOP;
+                }
+                return original.call(this, event, button, sequence);
+            };
+        });
     }
 
     _syncMode(ui) {
@@ -188,7 +267,7 @@ export default class ScreenVisionExtension extends Extension {
     }
 
     async _searchWithLens(ui) {
-        const capture = await captureSelection(ui);
+        const capture = await this._live.captureSubject(ui);
         if (!capture)
             return;
 

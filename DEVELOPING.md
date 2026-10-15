@@ -54,6 +54,7 @@ lib/vision/       Vision providers: provider.js (contract), tesseract.js, index.
 lib/screenContext.js  What is known about the current screen; answers "what's in this rectangle?"
 lib/intents.js    Suggested actions for a selection (open link, Wi-Fi password, copy, search, Lens...)
 lib/narration.js  What the bubble says about a selection (headline + text)
+lib/textSelection.js  Live Text: hit-testing, word ranges, lines, highlight bars, click counting
 ui/bubble.js      The assistant's voice: streaming text bubble with action chips (see DESIGN.md)
 ui/textReveal.js  Word-by-word fade-in rendering for the bubble (unit-tested)
 ui/pill.js        The slim bottom pill: Whole screen, hint, close
@@ -122,6 +123,12 @@ versions; check them when adding a new version to `metadata.json`):
 - `_getSelectedGeometry()`, `_stageScreenshot`, `_scale`: read the selected pixels
 - `_panel`, `_closeButton`: the stock toolbar, hidden in screenshot mode
 - `_castButton`: checked in recording mode, where ScreenVision steps aside
+- `_areaSelector._onPress / _onMotion / _onRelease` and `_computeCursorType()`: wrapped
+  so a press on a recognised word starts a Live Text selection, while presses on empty
+  space and on the area's edges/handles still go to GNOME; `set_cursor_type()` shows
+  the I-beam
+- `_grabHelper.ungrab({isUser: true})`: what Esc triggers; wrapped so Esc first clears
+  a Live Text selection (GNOME delivers Esc to its grab helper before any widget)
 - `_selectionButton`: forced on in screenshot mode
 - the `key-press-event` signal: handled before the class's own key handler, so Enter,
   Ctrl+C and the stock mode keys (Space, C, W, V, P) are ScreenVision's

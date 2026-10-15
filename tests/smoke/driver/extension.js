@@ -54,6 +54,32 @@ function menuLabels(live) {
 // Created once, early: key presses sent right after creating a virtual
 // device can be dropped before the device is fully set up.
 let keyboard = null;
+let pointer = null;
+
+async function pointerTo(x, y) {
+    pointer.notify_absolute_motion(GLib.get_monotonic_time(), x, y);
+    await sleep(60);
+}
+
+async function click(x, y, {release = true} = {}) {
+    await pointerTo(x, y);
+    pointer.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.PRESSED);
+    await sleep(40);
+    if (release) {
+        pointer.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.RELEASED);
+        await sleep(40);
+    }
+}
+
+async function release() {
+    pointer.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.RELEASED);
+    await sleep(60);
+}
+
+function centreOf(live, text) {
+    const w = live.context.words.find(word => word.text === text);
+    return w ? [Math.round(w.x + w.width / 2), Math.round(w.y + w.height / 2)] : null;
+}
 
 async function pressKeys(keyvals) {
     const now = () => GLib.get_monotonic_time();
@@ -65,6 +91,8 @@ async function pressKeys(keyvals) {
 }
 
 async function run() {
+    pointer = Clutter.get_default_backend().get_default_seat()
+        .create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
     keyboard = Clutter.get_default_backend().get_default_seat()
         .create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
     await sleep(2500);
@@ -137,6 +165,51 @@ async function run() {
     const clip = await new Promise(resolve =>
         St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, text) => resolve(text)));
     check('Ctrl+C copies the text', clip === SAMPLE_TEXT, clip);
+
+    // ── Live Text selection with the mouse ──
+    const selector = ui._areaSelector;
+    const [rx, ry] = centreOf(live(), 'reads');
+    const [tx, ty] = centreOf(live(), 'this');
+    await pointerTo(rx, ry);
+    check('I-beam over recognised text', selector.get_cursor_type?.() === Clutter.CursorType.TEXT,
+        selector.get_cursor_type?.());
+
+    await click(rx, ry, {release: false});
+    await pointerTo(tx, ty);
+    await release();
+    check('drag selects words', live().hasTextSelection && live()._selected.text === 'reads this',
+        live()._selected.text);
+    check('selection drawn as one bar', live()._overlay._highlights.length === 1, live()._overlay._highlights.length);
+    await sleep(1200);
+    check('bubble speaks about the selected words',
+        live()._bubble.headlineText === '2 words selected' && live()._bubble.bodyText === 'reads this',
+        [live()._bubble.headlineText, live()._bubble.bodyText]);
+    await saveScreenshot('live-text-selection.png');
+
+    await pressKeys([Clutter.KEY_Control_L, Clutter.KEY_c]);
+    const selClip = await new Promise(resolve =>
+        St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, text) => resolve(text)));
+    check('Ctrl+C copies only the selected words', selClip === 'reads this', selClip);
+
+    await pressKeys([Clutter.KEY_Escape]);
+    check('Esc clears the text selection first', !live().hasTextSelection && ui.visible);
+
+    const [sx, sy] = centreOf(live(), 'ScreenVision');
+    await sleep(500);
+    await click(sx, sy);
+    await click(sx, sy);
+    check('double-click selects a word', live()._selected.text === 'ScreenVision', live()._selected.text);
+    await click(sx, sy);
+    check('triple-click selects the line', live()._selected.text === SAMPLE_TEXT, live()._selected.text);
+
+    // A press away from text still draws an area, replacing the text selection.
+    await sleep(500);
+    await click(700, 150, {release: false});
+    await pointerTo(900, 250);
+    await release();
+    const drawn = live().selectionRect(ui);
+    check('dragging empty space still draws an area',
+        !live().hasTextSelection && Math.abs(drawn.x - 700) <= 2 && Math.abs(drawn.width - 200) <= 3, drawn);
 
     // QR codes are found automatically and turned into suggestions.
     moveSelection(ui, 290, 550, 940, 830);

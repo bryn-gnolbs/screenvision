@@ -16,12 +16,15 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {captureScreen, captureSelection, isSelectionMode} from './capture.js';
+import {captureRect, captureScreen, captureSelection, isSelectionMode} from './capture.js';
 import {buildSearchUrl, clamp, logError, parseRgbaSetting} from './lib/common.js';
 import {suggestActions} from './lib/intents.js';
 import {describeSelection} from './lib/narration.js';
 import {makeEntry, MemoryStore} from './lib/memory.js';
-import {hasLettersOrDigits} from './lib/ocrText.js';
+import {hasLettersOrDigits, wordsToText} from './lib/ocrText.js';
+import {
+    ClickCounter, boundingRect, lineHighlights, lineRange, nearestWord, selectedWords, wordAt,
+} from './lib/textSelection.js';
 import {ScreenContext} from './lib/screenContext.js';
 import {saveScreenshot} from './lib/screenshotFile.js';
 import {scanCodes} from './lib/vision/codes.js';
@@ -41,6 +44,11 @@ const DEFAULT_STYLE = {
 };
 
 const MAX_ACTIONS = 5;
+// Live Text selection bars: system blue, see DESIGN.md.
+const SELECTION_COLOR = [0.04, 0.52, 1.0, 0.38];
+const SELECTION_PADDING = 2;
+// Margin added around selected words when capturing them as an image.
+const TEXT_CAPTURE_MARGIN = 6;
 // Pause after "Remembered" before the overlay closes.
 const CONFIRM_BEFORE_CLOSE_MS = 650;
 // How long the selection must rest before the bubble streams its text.
@@ -59,12 +67,23 @@ class OCRHighlightOverlay extends St.DrawingArea {
         });
 
         this._boxes = [];
+        this._highlights = [];
         this._style = DEFAULT_STYLE;
     }
 
     setBoxes(boxes) {
         this._boxes = boxes;
-        this.visible = boxes.length > 0;
+        this._sync();
+    }
+
+    /** Live Text selection: one rounded bar per selected line. */
+    setHighlights(rects) {
+        this._highlights = rects;
+        this._sync();
+    }
+
+    _sync() {
+        this.visible = this._boxes.length > 0 || this._highlights.length > 0;
         this.queue_repaint();
     }
 
@@ -107,6 +126,14 @@ class OCRHighlightOverlay extends St.DrawingArea {
             cr.stroke();
         }
 
+        cr.setSourceRGBA(...SELECTION_COLOR);
+        for (const r of this._highlights) {
+            const pad = SELECTION_PADDING;
+            roundedRect(cr, r.x - pad, r.y - pad, r.width + pad * 2, r.height + pad * 2,
+                Math.min(4, (r.height + pad * 2) / 2));
+            cr.fill();
+        }
+
         cr.$dispose();
     }
 });
@@ -124,6 +151,10 @@ export class LiveVisionController {
         this._avoidRect = avoidRect;
         this._memory = new MemoryStore();
         this._source = null;
+        // Live Text selection: indices into the screen's words, in reading order.
+        this._textSel = null;
+        this._textDragging = false;
+        this._clicks = new ClickCounter();
         this._overlay = null;
         this._bubbleLayer = null;
         this._bubble = null;
@@ -174,8 +205,11 @@ export class LiveVisionController {
         this._refineCancellable = null;
         this._context.clear();
         this._selected = {words: [], codes: [], text: ''};
+        this._textSel = null;
+        this._textDragging = false;
 
         this._overlay?.setBoxes([]);
+        this._overlay?.setHighlights([]);
         this._cancelSettle();
         this._cancelMessage();
         this._said = null;
@@ -240,19 +274,22 @@ export class LiveVisionController {
      * already known and never waits for recognition.
      */
     refreshSelection(ui) {
-        const selection = this._config.enabled ? this._getSelection(ui) : null;
-        if (!this._overlay || !selection) {
+        const subject = this._config.enabled ? this._subject(ui) : null;
+        if (!this._overlay || !subject) {
             this._overlay?.setBoxes([]);
+            this._overlay?.setHighlights([]);
             this._cancelSettle();
             if (!this._messageId)
                 this._bubble?.hide();
             return;
         }
 
-        this._selected = this._context.select(selection);
+        this._selected = subject.selected;
+        const area = this._getSelection(ui);
         this._overlay.set_size(global.stage.width, global.stage.height);
-        this._overlay.setBoxes(this._selected.words);
-        this._updateBubble(selection, false);
+        this._overlay.setBoxes(area ? this._context.select(area).words : []);
+        this._overlay.setHighlights(subject.text ? lineHighlights(subject.selected.words) : []);
+        this._updateBubble(subject.rect, false);
 
         // Once the selection stops moving, let the bubble speak.
         this._cancelSettle();
@@ -266,9 +303,102 @@ export class LiveVisionController {
     /** The selection has come to rest: stream what was understood. */
     settle(ui) {
         this._cancelSettle();
-        const selection = this._config.enabled ? this._getSelection(ui) : null;
-        if (selection && this._bubble)
-            this._updateBubble(selection, true);
+        const subject = this._config.enabled ? this._subject(ui) : null;
+        if (subject && this._bubble)
+            this._updateBubble(subject.rect, true);
+    }
+
+    // ── Live Text selection ───────────────────────────────────────────────
+
+    /** Index of the recognised word under a screen point, or -1. */
+    wordAtPoint(x, y) {
+        if (!this._config.enabled || this._context.status !== 'ready')
+            return -1;
+        return wordAt(this._context.words, x, y);
+    }
+
+    get hasTextSelection() {
+        return this._textSel !== null;
+    }
+
+    get isTextDragging() {
+        return this._textDragging;
+    }
+
+    /** Press on a word: start dragging; double-click selects the word, triple the line. */
+    pointerPress(ui, x, y, timeMs) {
+        const index = this.wordAtPoint(x, y);
+        if (index < 0)
+            return;
+        const clicks = this._clicks.press(x, y, timeMs);
+        if (clicks === 3) {
+            const [start, end] = lineRange(this._context.words, index);
+            this._textSel = {anchor: start, focus: end};
+        } else {
+            this._textSel = {anchor: index, focus: index};
+            this._textDragging = clicks === 1;
+        }
+        this.refreshSelection(ui);
+        if (!this._textDragging)
+            this.settle(ui);
+    }
+
+    /** Dragging: extend the selection to the word nearest the pointer. */
+    pointerMotion(ui, x, y) {
+        if (!this._textDragging || !this._textSel)
+            return;
+        const words = this._context.words;
+        const over = wordAt(words, x, y);
+        const focus = over >= 0 ? over : nearestWord(words, x, y);
+        if (focus >= 0 && focus !== this._textSel.focus) {
+            this._textSel = {...this._textSel, focus};
+            this.refreshSelection(ui);
+        }
+    }
+
+    pointerRelease(ui) {
+        if (!this._textDragging)
+            return;
+        this._textDragging = false;
+        this.settle(ui);
+    }
+
+    /** Drop the text selection; the area selection (if any) becomes the subject again. */
+    clearTextSelection(ui, refresh = true) {
+        if (!this._textSel && !this._textDragging)
+            return;
+        this._textSel = null;
+        this._textDragging = false;
+        this._said = null;
+        if (refresh)
+            this.refreshSelection(ui);
+    }
+
+    /**
+     * What the bubble, suggestions, Remember, Lens and Ctrl+C act on: the
+     * selected words if there is a text selection, otherwise the area.
+     *
+     * @returns {{rect: object, selected: object, text: boolean}|null}
+     */
+    _subject(ui) {
+        if (this._textSel) {
+            const words = selectedWords(this._context.words, this._textSel);
+            const rect = boundingRect(words);
+            if (rect)
+                return {rect, text: true, selected: {words, codes: [], text: wordsToText(words)}};
+            this._textSel = null;
+        }
+        const area = this._getSelection(ui);
+        return area ? {rect: area, text: false, selected: this._context.select(area)} : null;
+    }
+
+    /** Capture what the subject covers: the area, or the selected words plus a margin. */
+    captureSubject(ui) {
+        if (!this._textSel)
+            return captureSelection(ui);
+        const rect = this._subject(ui)?.rect;
+        const m = TEXT_CAPTURE_MARGIN;
+        return captureRect(ui, rect && {x: rect.x - m, y: rect.y - m, width: rect.width + 2 * m, height: rect.height + 2 * m});
     }
 
     /**
@@ -391,8 +521,8 @@ export class LiveVisionController {
      * assistant. The clipboard is left alone.
      */
     async remember(ui) {
-        const selection = this._getSelection(ui);
-        const capture = selection ? await captureSelection(ui) : null;
+        const selection = this._subject(ui)?.rect ?? null;
+        const capture = selection ? await this.captureSubject(ui) : null;
         if (!capture) {
             this.flash(_('Select something to remember'));
             return;
@@ -429,7 +559,7 @@ export class LiveVisionController {
             return;
         }
 
-        const capture = this._getSelection(ui) ? await captureSelection(ui) : null;
+        const capture = this._subject(ui) ? await this.captureSubject(ui) : null;
         if (!capture)
             return;
         St.Clipboard.get_default().set_content(St.ClipboardType.CLIPBOARD, 'image/png',
@@ -508,7 +638,7 @@ export class LiveVisionController {
     _updateBubble(selection, settled) {
         this._cancelMessage();
         const reading = this._context.status === 'reading' && this._selected.words.length === 0;
-        const narration = describeSelection(this._selected, {reading, _});
+        const narration = describeSelection(this._selected, {reading, textSelection: this._textSel !== null, _});
 
         // "Remember" always comes first: it is what Enter does.
         this._bubble.setActions([
