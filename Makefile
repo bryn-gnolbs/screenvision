@@ -4,10 +4,11 @@ UUID := screenvision@genolabs.net
 ZIP := build/$(UUID).shell-extension.zip
 SOURCES := $(shell git ls-files '*.js' '*.css' '*.json' '*.xml' 2>/dev/null)
 
-.PHONY: help test smoke pack install uninstall enable disable prefs logs nested clean
+.PHONY: help test lint smoke pack install uninstall enable disable prefs logs nested clean
 
 help:
 	@echo "make test      Run unit tests (plain gjs, no GNOME Shell needed)"
+	@echo "make lint      Check code style with ESLint (needs Node.js: sudo apt install nodejs npm)"
 	@echo "make smoke     End-to-end test in a throwaway headless GNOME Shell"
 	@echo "make pack      Build $(ZIP)"
 	@echo "make install   Pack and install for the current user (log out/in to load on Wayland)"
@@ -18,6 +19,13 @@ help:
 
 test:
 	gjs -m tests/run.js
+
+lint: node_modules
+	npx eslint .
+
+node_modules: package.json
+	npm install --no-audit --no-fund
+	@touch node_modules
 
 smoke: $(ZIP)
 	tests/smoke/run.sh

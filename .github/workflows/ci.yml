@@ -1,0 +1,35 @@
+# Runs on every push and pull request to this fork.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx eslint .
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GJS, GTK 4, libsoup 3 and Tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gjs gir1.2-gtk-4.0 gir1.2-soup-3.0 tesseract-ocr tesseract-ocr-eng xvfb
+      - name: Unit tests
+        # GTK needs a display for its key helpers; xvfb provides a virtual one.
+        run: xvfb-run -a gjs -m tests/run.js
+      - name: Settings schema compiles
+        run: glib-compile-schemas --strict --dry-run schemas
