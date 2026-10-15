@@ -14,6 +14,8 @@ import {planBands, mergeBandWords, recognizeInBands, chooseBandCount} from '../l
 import {parseZbarXml, scanCodes, codesAvailable} from '../lib/vision/codes.js';
 import {ScreenContext} from '../lib/screenContext.js';
 import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
+import {describeSelection, shorten, fill} from '../lib/narration.js';
+import {renderTokens, tokenize} from '../ui/textReveal.js';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import {hasLettersOrDigits, parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
@@ -274,6 +276,34 @@ test('suggestActions puts specific actions first and always offers Lens', () => 
 test('hasLettersOrDigits drops symbol-only words', () => {
     assertEqual(['|', '~—', 'é', '42', 'a-b', '…'].map(text => hasLettersOrDigits({text})),
         [false, false, true, true, true, false]);
+});
+
+test('describeSelection summarises codes, text and links', () => {
+    assertEqual(describeSelection({
+        text: 'Portal https://example.com/portal\nSecond line',
+        codes: [{data: 'WIFI:S:HomeNet;T:WPA;P:x;;'}],
+    }), {
+        headline: 'Wi-Fi network “HomeNet” · 2 lines of text · Link to example.com',
+        body: 'Portal https://example.com/portal\nSecond line',
+        thinking: false,
+    });
+    assertEqual(describeSelection({text: 'mail me@a.org'}).headline, '1 line of text · Email address');
+    assertEqual(describeSelection({}, {reading: true}).thinking, true);
+    assertEqual(describeSelection({}).headline, 'No text here');
+});
+
+test('shorten cuts at a word boundary and fill replaces placeholders', () => {
+    assertEqual(shorten('alpha beta gamma delta', 16), 'alpha beta…');
+    assertEqual(shorten('short', 16), 'short');
+    assertEqual(fill('%d lines in %s', 3, 'doc'), '3 lines in doc');
+});
+
+test('tokenize keeps spacing and renderTokens fades words in order', () => {
+    assertEqual(tokenize('Hello  world\nhi'), ['Hello  ', 'world\n', 'hi']);
+    const tokens = [{text: 'a<b ', start: 0}, {text: 'c', start: 100}];
+    assertEqual(renderTokens(tokens, 50, 100), {markup: '<span alpha="50%">a&lt;b </span>', done: false});
+    assertEqual(renderTokens(tokens, 200, 100), {markup: 'a&lt;b c', done: true});
+    assertEqual(renderTokens(tokens, 0, 0), {markup: 'a&lt;b ', done: false});
 });
 
 const loop = new GLib.MainLoop(null, false);

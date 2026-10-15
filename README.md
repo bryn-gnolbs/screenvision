@@ -12,8 +12,11 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
   in the background (about half a second). While you drag, recognised words light up and
   suggestions follow your selection instantly; when you let go, the selection is read again
   at full detail. All of this runs on your computer.
-- **Smart suggestions:** the menu adapts to what you select: open links, copy a Wi-Fi
-  password from a QR code, write an email, **Copy** text, **Search** it, or ask **Lens**.
+- **It tells you what it sees:** a small card follows your selection with a summary
+  ("2 lines of text · Link to example.com") and, once you pause, streams in the text it
+  read, word by word.
+- **Smart suggestions:** the card's buttons adapt to what you select: open links, copy a
+  Wi-Fi password from a QR code, write an email, **Copy** text, **Search** it, or ask **Lens**.
 - **QR codes:** codes on screen are found automatically; the grid button copies them too.
 - **Google Lens:** the magnifier button sends the selected area to Google Lens and opens
   the results in your browser.
@@ -75,7 +78,8 @@ gnome-extensions disable shotzy@SamkitJain660.github.io
 
 ## Development
 
-See [DEVELOPING.md](DEVELOPING.md). `make test` runs the unit tests and `make smoke` runs an
+See [DEVELOPING.md](DEVELOPING.md) for the code and [DESIGN.md](DESIGN.md) for the design
+language shared by all parts of the project. `make test` runs the unit tests and `make smoke` runs an
 end-to-end check in a throwaway headless GNOME Shell.
 
 ## Privacy

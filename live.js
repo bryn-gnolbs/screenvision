@@ -18,12 +18,14 @@ import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js'
 import {captureScreen, captureSelection, isSelectionMode} from './capture.js';
 import {buildSearchUrl, clamp, logError, parseRgbaSetting} from './lib/common.js';
 import {suggestActions} from './lib/intents.js';
+import {describeSelection} from './lib/narration.js';
 import {hasLettersOrDigits} from './lib/ocrText.js';
 import {ScreenContext} from './lib/screenContext.js';
 import {scanCodes} from './lib/vision/codes.js';
 import {createProvider} from './lib/vision/index.js';
 import {wordsToStage} from './lib/vision/provider.js';
 import {chooseBandCount, recognizeInBands} from './lib/vision/tiling.js';
+import {AgentBubble} from './ui/bubble.js';
 
 const DEFAULT_STYLE = {
     fill: [0.10, 0.11, 0.13, 0.34],
@@ -35,7 +37,11 @@ const DEFAULT_STYLE = {
     borderWidth: 1.25,
 };
 
-const MAX_MENU_ACTIONS = 5;
+const MAX_ACTIONS = 5;
+// How long the selection must rest before the bubble streams its text.
+const SETTLE_MS = 400;
+// How long a stand-alone message stays up.
+const MESSAGE_MS = 2200;
 // Minimum confidence for words from the whole-screen read (0-100).
 const SCREEN_MIN_CONFIDENCE = 50;
 
@@ -104,18 +110,17 @@ export class LiveVisionController {
     /**
      * @param {Gio.Settings} settings - extension settings
      * @param {object} hooks
-     * @param {function(string): void} hooks.showMessage - shows a toast in the screenshot UI
      * @param {function(): void} hooks.searchWithLens - sends the selection to Google Lens
      */
-    constructor(settings, {showMessage, searchWithLens}) {
+    constructor(settings, {searchWithLens}) {
         this._settings = settings;
-        this._showMessage = showMessage;
         this._searchWithLens = searchWithLens;
         this._overlay = null;
-        this._menuLayer = null;
-        this._menu = null;
-        this._status = null;
-        this._menuSignature = null;
+        this._bubbleLayer = null;
+        this._bubble = null;
+        this._settleId = 0;
+        this._messageId = 0;
+        this._said = null;
         this._selected = {words: [], codes: [], text: ''};
         this._context = new ScreenContext();
         this._screenCancellable = null;
@@ -137,10 +142,9 @@ export class LiveVisionController {
 
         this._overlay?.destroy();
         this._overlay = null;
-        this._menuLayer?.destroy();
-        this._menuLayer = null;
-        this._menu = null;
-        this._status = null;
+        this._bubbleLayer?.destroy();
+        this._bubbleLayer = null;
+        this._bubble = null;
     }
 
     /** The current selection rectangle in stage coordinates, or null. */
@@ -163,7 +167,43 @@ export class LiveVisionController {
         this._selected = {words: [], codes: [], text: ''};
 
         this._overlay?.setBoxes([]);
-        this._hideMenu();
+        this._cancelSettle();
+        this._cancelMessage();
+        this._said = null;
+        this._bubble?.hide();
+    }
+
+    /**
+     * Say something short in the bubble, e.g. a confirmation or a problem.
+     * Next to the selection it briefly replaces the headline; with no
+     * selection it appears above the toolbar and fades away.
+     */
+    flash(text) {
+        if (!this._bubble)
+            return;
+
+        if (this._bubble.visible && this._getSelection(Main.screenshotUI)) {
+            this._bubble.flash(text);
+            return;
+        }
+
+        this._cancelMessage();
+        this._said = null;
+        this._bubble.say({headline: text});
+        this._bubble.setActions([]);
+        this._bubble.show();
+        const hud = getHudRect();
+        const [, width] = this._bubble.get_preferred_width(-1);
+        const [, height] = this._bubble.get_preferred_height(width);
+        this._bubble.set_position(
+            Math.round((global.stage.width - width) / 2),
+            Math.max(12, Math.round((hud?.y ?? global.stage.height) - height - 16)));
+        this._raiseBubble();
+        this._messageId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MESSAGE_MS, () => {
+            this._messageId = 0;
+            this._bubble?.hide();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     /** Called each time the screenshot UI opens. */
@@ -193,14 +233,32 @@ export class LiveVisionController {
         const selection = this._config.enabled ? this._getSelection(ui) : null;
         if (!this._overlay || !selection) {
             this._overlay?.setBoxes([]);
-            this._hideMenu();
+            this._cancelSettle();
+            if (!this._messageId)
+                this._bubble?.hide();
             return;
         }
 
         this._selected = this._context.select(selection);
         this._overlay.set_size(global.stage.width, global.stage.height);
         this._overlay.setBoxes(this._selected.words);
-        this._showMenu(selection);
+        this._updateBubble(selection, false);
+
+        // Once the selection stops moving, let the bubble speak.
+        this._cancelSettle();
+        this._settleId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SETTLE_MS, () => {
+            this._settleId = 0;
+            this.settle(ui);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    /** The selection has come to rest: stream what was understood. */
+    settle(ui) {
+        this._cancelSettle();
+        const selection = this._config.enabled ? this._getSelection(ui) : null;
+        if (selection && this._bubble)
+            this._updateBubble(selection, true);
     }
 
     /**
@@ -210,6 +268,7 @@ export class LiveVisionController {
     async recognizeSelection(ui) {
         if (!this._config.enabled || !this._checkAvailable())
             return;
+        this.settle(ui);
 
         const selection = this._getSelection(ui);
         if (!selection || this._context.hasRefined(selection))
@@ -239,6 +298,7 @@ export class LiveVisionController {
                 offsetY: selection.y,
             }));
             this.refreshSelection(ui);
+            this.settle(ui);
         } catch (e) {
             if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 throw e;
@@ -313,7 +373,7 @@ export class LiveVisionController {
 
         if (!this._warnedUnavailable) {
             this._warnedUnavailable = true;
-            this._showMessage(_('Install %s to recognise text').format(this._provider.name));
+            this.flash(_('Install %s to recognise text').format(this._provider.name));
         }
         return false;
     }
@@ -346,20 +406,15 @@ export class LiveVisionController {
             ui._stageScreenshotContainer.insert_child_above(this._overlay, ui._stageScreenshot);
         }
 
-        if (!this._menuLayer) {
-            this._menuLayer = new St.Widget({reactive: false});
-            this._menuLayer.add_constraint(new Clutter.BindConstraint({
+        if (!this._bubbleLayer) {
+            this._bubbleLayer = new St.Widget({reactive: false});
+            this._bubbleLayer.add_constraint(new Clutter.BindConstraint({
                 source: global.stage,
                 coordinate: Clutter.BindCoordinate.ALL,
             }));
-
-            this._menu = new St.BoxLayout({
-                style_class: 'ssv-text-menu',
-                visible: false,
-                reactive: true,
-            });
-            this._menuLayer.add_child(this._menu);
-            ui.insert_child_above(this._menuLayer, ui._areaSelector);
+            this._bubble = new AgentBubble();
+            this._bubbleLayer.add_child(this._bubble);
+            ui.insert_child_above(this._bubbleLayer, ui._areaSelector);
         }
     }
 
@@ -375,49 +430,60 @@ export class LiveVisionController {
         return {x, y, width, height};
     }
 
-    /** Rebuild the buttons only when the suggestions change, then place the menu. */
-    _showMenu(selection) {
-        if (!this._menu)
-            return;
-
+    /**
+     * Update the bubble for a selection. While the selection moves only the
+     * headline and actions change (instantly); once it settles the text
+     * streams in. Repeating the same message does not re-animate it.
+     */
+    _updateBubble(selection, settled) {
+        this._cancelMessage();
         const reading = this._context.status === 'reading' && this._selected.words.length === 0;
-        const suggestions = suggestActions(this._selected).slice(0, MAX_MENU_ACTIONS);
-        const signature = JSON.stringify([reading, suggestions]);
+        const narration = describeSelection(this._selected, {reading, _});
 
-        if (signature !== this._menuSignature) {
-            this._menuSignature = signature;
-            this._menu.destroy_all_children();
-            if (reading) {
-                this._menu.add_child(new St.Label({
-                    text: _('Reading screen…'),
-                    style_class: 'ssv-text-menu-status',
-                    y_align: Clutter.ActorAlign.CENTER,
-                }));
-            }
-            for (const suggestion of suggestions) {
-                const button = new St.Button({
-                    label: this._labelFor(suggestion),
-                    style_class: 'ssv-text-menu-button',
-                    can_focus: true,
-                    y_align: Clutter.ActorAlign.CENTER,
-                });
-                button.connect('clicked', () => this._runAction(suggestion));
-                this._menu.add_child(button);
-            }
+        this._bubble.setActions(suggestActions(this._selected)
+            .slice(0, MAX_ACTIONS)
+            .map(suggestion => ({
+                label: this._labelFor(suggestion),
+                onActivate: () => this._runAction(suggestion),
+            })));
+
+        const key = `${narration.headline}\n${narration.body}`;
+        if (narration.thinking) {
+            if (this._said !== 'thinking')
+                this._bubble.think(narration.headline);
+            this._said = 'thinking';
+        } else if (settled) {
+            if (this._said !== key)
+                this._bubble.say(narration);
+            this._said = key;
+        } else if (this._said !== key) {
+            // Moving: show the new headline at once, hold the text back.
+            if (this._said !== `${narration.headline}\n`)
+                this._bubble.say({headline: narration.headline});
+            this._said = `${narration.headline}\n`;
         }
 
-        const [, menuWidth] = this._menu.get_preferred_width(-1);
-        const [, menuHeight] = this._menu.get_preferred_height(menuWidth);
-        const position = placeMenu(selection, {width: menuWidth, height: menuHeight},
-            getHudRect(), {width: global.stage.width, height: global.stage.height});
-
-        this._menu.set_position(position.x, position.y);
-        this._menu.show();
-        this._menuLayer.set_child_above_sibling(this._menu, null);
+        this._bubble.show();
+        this._bubble.placeNear(selection, getHudRect());
+        this._raiseBubble();
     }
 
-    _hideMenu() {
-        this._menu?.hide();
+    _raiseBubble() {
+        this._bubbleLayer?.get_parent()?.set_child_above_sibling(this._bubbleLayer, null);
+    }
+
+    _cancelSettle() {
+        if (this._settleId) {
+            GLib.source_remove(this._settleId);
+            this._settleId = 0;
+        }
+    }
+
+    _cancelMessage() {
+        if (this._messageId) {
+            GLib.source_remove(this._messageId);
+            this._messageId = 0;
+        }
     }
 
     _labelFor({kind, detail}) {
@@ -471,7 +537,7 @@ export class LiveVisionController {
         const clipboard = St.Clipboard.get_default();
         clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
         clipboard.set_text(St.ClipboardType.PRIMARY, text);
-        this._showMessage(message);
+        this.flash(message);
 
         if (closeAfter)
             Main.screenshotUI?.close();
@@ -483,7 +549,7 @@ export class LiveVisionController {
             Main.screenshotUI?.close();
         } catch (e) {
             logError(`Opening ${uri} failed`, e);
-            this._showMessage(_('Could not open %s').format(uri));
+            this.flash(_('Could not open %s').format(uri));
         }
     }
 
@@ -512,48 +578,6 @@ export class LiveVisionController {
     }
 }
 
-/**
- * Pick a spot for the suggestions menu: below the selection, then above, then
- * either side, skipping spots that leave the screen or cover the screenshot
- * toolbar.
- */
-function placeMenu(selection, menu, blocker, stage) {
-    const margin = 12;
-    const fitX = x => clamp(Math.round(x), margin, stage.width - menu.width - margin);
-    const fitY = y => clamp(Math.round(y), margin, stage.height - menu.height - margin);
-
-    const centerX = fitX(selection.x + (selection.width - menu.width) / 2);
-    const centerY = fitY(selection.y + (selection.height - menu.height) / 2);
-    const below = Math.round(selection.y + selection.height + margin);
-    const above = Math.round(selection.y - menu.height - margin);
-
-    const candidates = [
-        {x: centerX, y: below},
-        {x: centerX, y: above},
-        {x: Math.round(selection.x + selection.width + margin), y: centerY},
-        {x: Math.round(selection.x - menu.width - margin), y: centerY},
-    ];
-
-    const inflated = blocker && {
-        x: blocker.x - margin,
-        y: blocker.y - margin,
-        width: blocker.width + margin * 2,
-        height: blocker.height + margin * 2,
-    };
-
-    for (const {x, y} of candidates) {
-        const rect = {x, y, width: menu.width, height: menu.height};
-        const onScreen = x >= margin && y >= margin &&
-            x + menu.width <= stage.width - margin &&
-            y + menu.height <= stage.height - margin;
-        if (onScreen && !(inflated && rectsOverlap(rect, inflated)))
-            return {x, y};
-    }
-
-    // Nothing is fully clear; stay on screen below or above the selection.
-    return {x: centerX, y: below + menu.height <= stage.height - margin ? below : fitY(above)};
-}
-
 function getHudRect() {
     const panel = Main.screenshotUI?._panel;
     if (!panel?.visible)
@@ -566,13 +590,6 @@ function getHudRect() {
         width: extents.get_width(),
         height: extents.get_height(),
     };
-}
-
-function rectsOverlap(a, b) {
-    return a.x < b.x + b.width &&
-        a.x + a.width > b.x &&
-        a.y < b.y + b.height &&
-        a.y + a.height > b.y;
 }
 
 function roundedRect(cr, x, y, width, height, radius) {

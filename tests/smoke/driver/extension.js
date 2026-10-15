@@ -46,7 +46,7 @@ function moveSelection(ui, x1, y1, x2, y2) {
 }
 
 function menuLabels(live) {
-    return live._menu.get_children().map(child => child.label ?? child.text);
+    return live._bubble.actionLabels;
 }
 
 // Created once, early: key presses sent right after creating a virtual
@@ -102,9 +102,20 @@ async function run() {
     // Live: while dragging (no release yet) the selection already has its text.
     moveSelection(ui, 280, 280, 1200, 420);
     check('text is live while dragging', live()._selected.text === SAMPLE_TEXT, live()._selected.text);
-    check('suggestions shown while dragging', live()._menu.visible, menuLabels(live()));
+    check('bubble shown while dragging', live()._bubble.visible, live()._bubble.headlineText);
+    check('bubble holds text back while moving', live()._bubble.bodyText === '', live()._bubble.bodyText);
     check('suggestions offer copy, search and lens',
         ['Copy', 'Search', 'Lens'].every(l => menuLabels(live()).includes(l)), menuLabels(live()));
+
+    // Resting: after a moment the bubble says what it sees, streaming the text.
+    // Settles after 400 ms; capture just after the text starts streaming in.
+    await sleep(470);
+    await saveScreenshot('bubble-streaming.png');
+    await sleep(1000);
+    check('bubble speaks once the selection rests',
+        live()._bubble.headlineText === '1 line of text' && live()._bubble.bodyText === SAMPLE_TEXT,
+        [live()._bubble.headlineText, live()._bubble.bodyText]);
+    await saveScreenshot('bubble-text.png');
 
     // Release: the selection is read again at full detail.
     ui._areaSelector.emit('drag-ended');
@@ -117,7 +128,8 @@ async function run() {
     await saveScreenshot('live-text.png');
 
     await ext()._scanQrCode(ui);
-    check('qr reports no code', ext()._toast?.text === 'No QR code found in the selection', ext()._toast?.text);
+    check('qr reports no code in the bubble', live()._bubble._headline.text === 'No QR code found in the selection',
+        live()._bubble._headline.text);
 
     live()._runAction({kind: 'copy-text', value: live()._selected.text});
     const clip = await new Promise(resolve =>
@@ -130,7 +142,11 @@ async function run() {
         live()._selected.codes.map(c => c.data));
     check('qr suggestions offered', menuLabels(live()).includes('Open example.com') &&
         menuLabels(live()).includes('Copy Wi-Fi password (HomeNet)'), menuLabels(live()));
-    await saveScreenshot('live-qr.png');
+    await sleep(1500);
+    check('bubble describes the QR codes',
+        live()._bubble.headlineText === 'Wi-Fi network “HomeNet” · QR code for example.com',
+        live()._bubble.headlineText);
+    await saveScreenshot('bubble-qr.png');
 
     ui.close();
     await sleep(800);

@@ -53,6 +53,9 @@ lib/vision/       Vision providers: provider.js (contract), tesseract.js, index.
                   tiling.js (parallel bands for whole screens), codes.js (QR/barcodes via zbar)
 lib/screenContext.js  What is known about the current screen; answers "what's in this rectangle?"
 lib/intents.js    Suggested actions for a selection (open link, Wi-Fi password, copy, search, Lens...)
+lib/narration.js  What the bubble says about a selection (headline + text)
+ui/bubble.js      The assistant's voice: streaming text bubble with action chips (see DESIGN.md)
+ui/textReveal.js  Word-by-word fade-in rendering for the bubble (unit-tested)
 lib/ocrText.js    Pure TSV → words → text logic (unit-tested)
 lib/shortcutKeys.js  Key press → shortcut string for the prefs picker (GTK, unit-tested)
 stylesheet.css    St widget styling (loaded automatically by the shell)

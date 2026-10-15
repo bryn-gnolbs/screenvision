@@ -4,7 +4,6 @@
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 
@@ -20,7 +19,6 @@ import {LensLauncher} from './uploader.js';
 import {logError} from './lib/common.js';
 import {codesAvailable, scanCodes} from './lib/vision/codes.js';
 
-const TOAST_TIMEOUT_MS = 1800;
 const NOTIFY_PREVIEW_CHARS = 120;
 
 const Tooltip = GObject.registerClass(
@@ -71,12 +69,9 @@ export default class ScreenVisionExtension extends Extension {
         this._injections = new InjectionManager();
         this._lens = new LensLauncher();
         this._live = new LiveVisionController(this._settings, {
-            showMessage: text => this._showToast(text),
             searchWithLens: () => this._searchWithLens(ui).catch(e => logError('Google Lens', e)),
         });
         this._shortcut = new ScreenshotShortcut(this._settings);
-        this._toast = null;
-        this._toastTimeoutId = 0;
 
         this._hookScreenshotUI(ui);
         this._createButtons(ui);
@@ -108,12 +103,6 @@ export default class ScreenVisionExtension extends Extension {
         this._qrButton?.destroy();
         this._qrButton = null;
 
-        if (this._toastTimeoutId) {
-            GLib.source_remove(this._toastTimeoutId);
-            this._toastTimeoutId = 0;
-        }
-        this._toast?.destroy();
-        this._toast = null;
 
         this._live.destroy();
         this._live = null;
@@ -313,41 +302,8 @@ export default class ScreenVisionExtension extends Extension {
         Main.notify(_('QR code copied'), preview);
     }
 
-    /** Show a short message floating above the screenshot toolbar. */
+    /** Say something short through the assistant's bubble. */
     _showToast(text) {
-        const ui = Main.screenshotUI;
-
-        if (!this._toast) {
-            this._toast = new St.Label({style_class: 'ssv-toast', visible: false});
-            ui.add_child(this._toast);
-        }
-        if (this._toastTimeoutId)
-            GLib.source_remove(this._toastTimeoutId);
-
-        const toast = this._toast;
-        toast.remove_all_transitions();
-        toast.text = text;
-        toast.opacity = 0;
-        toast.show();
-        ui.set_child_above_sibling(toast, null);
-
-        const [, width] = toast.get_preferred_width(-1);
-        const [, height] = toast.get_preferred_height(width);
-        const panel = ui._panel?.get_transformed_extents();
-        toast.set_position(
-            Math.max(12, Math.round((global.stage.width - width) / 2)),
-            panel ? Math.max(12, Math.round(panel.get_y() - height - 16)) : 24);
-        toast.ease({opacity: 255, duration: 120, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-
-        this._toastTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TOAST_TIMEOUT_MS, () => {
-            this._toastTimeoutId = 0;
-            toast.ease({
-                opacity: 0,
-                duration: 120,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                onComplete: () => toast.hide(),
-            });
-            return GLib.SOURCE_REMOVE;
-        });
+        this._live.flash(text);
     }
 }
