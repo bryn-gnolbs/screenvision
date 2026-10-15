@@ -26,7 +26,7 @@ $(ZIP): $(SOURCES) Makefile
 	@mkdir -p build
 	gnome-extensions pack --force --out-dir=build \
 		--extra-source=capture.js --extra-source=ocr.js \
-		--extra-source=uploader.js --extra-source=lib .
+		--extra-source=uploader.js --extra-source=shortcut.js --extra-source=lib .
 	@# pack does not compile the settings schema; GNOME Shell needs the compiled file.
 	@mkdir -p build/schemas
 	glib-compile-schemas --strict --targetdir=build/schemas schemas

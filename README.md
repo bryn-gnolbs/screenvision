@@ -14,6 +14,8 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
   copies the content.
 - **Google Lens:** the magnifier button sends the selected area to Google Lens and opens
   the results in your browser.
+- **Your own shortcut:** open the screenshot tool with any key combination, such as
+  Super+Shift+S, set under *General → Keyboard Shortcut*. Print Screen keeps working too.
 
 ### Changes since Shotzy
 

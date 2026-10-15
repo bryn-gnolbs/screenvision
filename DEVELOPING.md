@@ -45,9 +45,11 @@ extension.js      Entry point: hooks the screenshot UI, adds the Lens and QR but
 ocr.js            OCR controller: runs Tesseract, draws highlight boxes, Copy/Search menu
 capture.js        Grabs the selected area from the screenshot UI's frozen frame as PNG
 uploader.js       Google Lens upload over HTTPS (returns the results URL)
+shortcut.js       Optional extra keyboard shortcut that opens the screenshot tool
 prefs.js          Preferences window (separate GTK process)
 lib/common.js     Shared helpers: subprocesses, temp files, Tesseract languages, settings parsing
 lib/ocrText.js    Pure TSV → words → text logic (unit-tested)
+lib/shortcutKeys.js  Key press → shortcut string for the prefs picker (GTK, unit-tested)
 stylesheet.css    St widget styling (loaded automatically by the shell)
 schemas/          GSettings schema: every user setting is declared here
 tests/run.js      Unit tests, run with plain gjs
@@ -94,7 +96,9 @@ extensions are shared with your real session. If you also have the original Shot
 installed, disable one of them so both don't add buttons.
 
 `make smoke` is the quickest safety net. It runs with its own D-Bus, in-memory
-settings and a temporary data directory, so it never touches your desktop. It also saves
+settings, and temporary data and runtime directories, so it never touches your desktop.
+(The runtime directory matters: GNOME Shell keeps a crash-protection file there that,
+if left behind in your real `/run/user/$UID`, would disable extensions after a crash.) It also saves
 a screenshot (`ocr.png`) in the folder it prints.
 
 ## Packaging notes

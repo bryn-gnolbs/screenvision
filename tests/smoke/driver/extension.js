@@ -5,6 +5,7 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -44,7 +45,22 @@ function selectArea(ui, x1, y1, x2, y2) {
     selector.emit('drag-ended');
 }
 
+// Created once, early: key presses sent right after creating a virtual
+// device can be dropped before the device is fully set up.
+let keyboard = null;
+
+async function pressKeys(keyvals) {
+    const now = () => GLib.get_monotonic_time();
+    for (const keyval of keyvals)
+        keyboard.notify_keyval(now(), keyval, Clutter.KeyState.PRESSED);
+    for (const keyval of [...keyvals].reverse())
+        keyboard.notify_keyval(now(), keyval, Clutter.KeyState.RELEASED);
+    await sleep(800);
+}
+
 async function run() {
+    keyboard = Clutter.get_default_backend().get_default_seat()
+        .create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
     await sleep(2500);
     const info = Main.extensionManager.lookup(UUID);
     check('extension enabled', info?.state === 1, info?.error ?? info?.state);
@@ -94,14 +110,56 @@ async function run() {
     await sleep(500);
     check('re-enable works', Main.extensionManager.lookup(UUID).state === 1);
 
+    // Custom shortcut: Print (GNOME's own) registers nothing extra; a new
+    // combination is registered and actually opens the screenshot tool.
+    // GNOME applies a changed shortcut on its next idle cycle, hence the waits.
+    const settings = ext()._settings;
+    check('default Print shortcut left to GNOME', !ext()._shortcut.registered);
+    await pressKeys([Clutter.KEY_Print]);
+    check('Print still opens screenshot tool', ui.visible);
+    ui.close();
+    await sleep(800);
+
+    settings.set_strv('screenshot-shortcut', ['<Shift><Super>s']);
+    check('custom shortcut registered', ext()._shortcut.registered);
+    await sleep(300);
+    await pressKeys([Clutter.KEY_Super_L, Clutter.KEY_Shift_L, Clutter.KEY_s]);
+    check('Super+Shift+S opens screenshot tool', ui.visible);
+    ui.close();
+    await sleep(800);
+
+    settings.set_strv('screenshot-shortcut', ['<Control><Alt>p']);
+    await sleep(300);
+    await pressKeys([Clutter.KEY_Control_L, Clutter.KEY_Alt_L, Clutter.KEY_p]);
+    check('changing the shortcut takes effect', ui.visible);
+    ui.close();
+    await sleep(800);
+
+    settings.set_strv('screenshot-shortcut', []);
+    check('empty shortcut unregisters', !ext()._shortcut.registered);
+    settings.set_strv('screenshot-shortcut', ['<Shift><Super>s']);
+    Main.extensionManager.disableExtension(UUID);
+    await sleep(300);
+    check('disable removes custom shortcut', !Main.wm._allowedKeybindings?.['screenshot-shortcut']);
+    Main.extensionManager.enableExtension(UUID);
+    await sleep(300);
+    settings.reset('screenshot-shortcut');
+
     ext()._settings.set_boolean('show-qr-button', false);
     check('hiding qr restores toolbar', JSON.stringify(panelRows()) === '["type","bottom"]', panelRows());
     ext()._settings.set_boolean('show-qr-button', true);
     check('showing qr wraps toolbar', JSON.stringify(panelRows()) === '["other"]', panelRows());
 }
 
+// GNOME briefly disables and re-enables extensions loaded after one that is
+// toggled (including this driver), so make sure the script runs only once.
+let started = false;
+
 export default class SmokeDriver extends Extension {
     enable() {
+        if (started)
+            return;
+        started = true;
         run()
             .catch(e => report('FAIL driver crashed', `${e.message}\n${e.stack}`))
             .finally(() => report('done', true));

@@ -2,7 +2,7 @@
 # End-to-end smoke test in a throwaway headless GNOME Shell.
 #
 # Everything is isolated from your desktop session: a private D-Bus, in-memory
-# settings and a temporary data directory. Nothing is installed into your
+# settings, and temporary data and runtime directories. Nothing is installed into your
 # real ~/.local/share and your running shell is never touched.
 #
 # Usage: tests/smoke/run.sh   (or `make smoke`). Needs the zip from `make pack`.
@@ -14,6 +14,11 @@ OUT="$(mktemp -d -t ssv-smoke-XXXXXX)"
 [ -f "$ZIP" ] || { echo "Missing $ZIP - run 'make pack' first" >&2; exit 2; }
 
 export XDG_DATA_HOME="$OUT/data" XDG_CONFIG_HOME="$OUT/config" XDG_CACHE_HOME="$OUT/cache"
+# Own runtime dir too: GNOME Shell keeps crash-protection state there, which
+# must never leak into the real session's /run/user/$UID.
+# Kept short on purpose: Wayland socket paths are limited to 108 bytes.
+export XDG_RUNTIME_DIR="$(mktemp -d /tmp/ssv-rt-XXXXXX)"
+trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
 export GSETTINGS_BACKEND=memory SSV_SMOKE_OUT="$OUT"
 EXT_DIR="$XDG_DATA_HOME/gnome-shell/extensions"
 mkdir -p "$EXT_DIR/smart-screenvision@genolabs.net" "$EXT_DIR/ssv-smoke-driver@test"

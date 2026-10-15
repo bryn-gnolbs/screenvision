@@ -14,6 +14,7 @@ import {
     SEARCH_ENGINES, formatRgbaSetting, hasProgram, listTesseractLanguages,
     normalizeLanguageSelection, parseRgbaSetting,
 } from './lib/common.js';
+import {interpretKeyPress} from './lib/shortcutKeys.js';
 
 export default class SmartScreenVisionPreferences extends ExtensionPreferences {
     async fillPreferencesWindow(window) {
@@ -21,15 +22,16 @@ export default class SmartScreenVisionPreferences extends ExtensionPreferences {
         const languages = await listTesseractLanguages();
 
         window.set_default_size(720, 640);
+        window.add(this._buildGeneralPage(settings, window));
         window.add(this._buildAppearancePage(settings));
         window.add(this._buildOcrPage(settings, languages));
         window.add(this._buildSearchPage(settings));
     }
 
-    _buildAppearancePage(settings) {
+    _buildGeneralPage(settings, window) {
         const page = new Adw.PreferencesPage({
-            title: _('Highlighting'),
-            icon_name: 'preferences-desktop-theme-symbolic',
+            title: _('General'),
+            icon_name: 'preferences-system-symbolic',
         });
 
         const missingRow = this._buildMissingToolsRow();
@@ -38,6 +40,40 @@ export default class SmartScreenVisionPreferences extends ExtensionPreferences {
             group.add(missingRow);
             page.add(group);
         }
+
+        const shortcutGroup = new Adw.PreferencesGroup({
+            title: _('Keyboard Shortcut'),
+            description: _('Print Screen always opens the screenshot tool as well; ' +
+                'change that in Settings › Keyboard › Keyboard Shortcuts.'),
+        });
+        shortcutGroup.add(this._shortcutRow(settings, 'screenshot-shortcut', window, {
+            title: _('Open screenshot tool'),
+            defaultLabel: _('Print Screen'),
+        }));
+        page.add(shortcutGroup);
+
+        const buttonsGroup = new Adw.PreferencesGroup({
+            title: _('Screenshot Buttons'),
+            description: _('Extra buttons shown in the screenshot tool.'),
+        });
+        buttonsGroup.add(this._switchRow(settings, 'show-google-lens-button', {
+            title: _('Google Lens'),
+            subtitle: _('Send the selected area to Google Lens. The image is uploaded to Google.'),
+        }));
+        buttonsGroup.add(this._switchRow(settings, 'show-qr-button', {
+            title: _('QR code scanner'),
+            subtitle: _('Read QR codes and barcodes in the selected area and copy their content.'),
+        }));
+        page.add(buttonsGroup);
+
+        return page;
+    }
+
+    _buildAppearancePage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Highlighting'),
+            icon_name: 'preferences-desktop-theme-symbolic',
+        });
 
         const group = new Adw.PreferencesGroup({
             title: _('Appearance'),
@@ -131,21 +167,6 @@ export default class SmartScreenVisionPreferences extends ExtensionPreferences {
         });
         searchGroup.add(engineRow);
 
-        const buttonsGroup = new Adw.PreferencesGroup({
-            title: _('Screenshot Buttons'),
-            description: _('Extra buttons shown in the screenshot tool.'),
-        });
-        page.add(buttonsGroup);
-
-        buttonsGroup.add(this._switchRow(settings, 'show-google-lens-button', {
-            title: _('Google Lens'),
-            subtitle: _('Send the selected area to Google Lens. The image is uploaded to Google.'),
-        }));
-        buttonsGroup.add(this._switchRow(settings, 'show-qr-button', {
-            title: _('QR code scanner'),
-            subtitle: _('Read QR codes and barcodes in the selected area and copy their content.'),
-        }));
-
         return page;
     }
 
@@ -210,6 +231,93 @@ export default class SmartScreenVisionPreferences extends ExtensionPreferences {
         return row;
     }
 
+    /**
+     * A row showing a keyboard shortcut. Clicking it opens a dialog that
+     * records the next key combination.
+     */
+    _shortcutRow(settings, key, window, {title, defaultLabel}) {
+        const label = new Gtk.ShortcutLabel({
+            disabled_text: _('Disabled'),
+            valign: Gtk.Align.CENTER,
+        });
+        const reset = new Gtk.Button({
+            icon_name: 'edit-undo-symbolic',
+            tooltip_text: _('Reset to %s').format(defaultLabel),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        const row = new Adw.ActionRow({
+            title,
+            subtitle: _('Click to change'),
+            activatable: true,
+        });
+        row.add_suffix(reset);
+        row.add_suffix(label);
+
+        const sync = () => {
+            label.accelerator = settings.get_strv(key)[0] ?? '';
+            reset.sensitive = settings.get_user_value(key) !== null;
+        };
+        sync();
+        settings.connect(`changed::${key}`, sync);
+
+        reset.connect('clicked', () => settings.reset(key));
+        row.connect('activated', () => {
+            this._recordShortcut(window, title, accelerator => {
+                settings.set_strv(key, accelerator ? [accelerator] : []);
+            });
+        });
+        return row;
+    }
+
+    /**
+     * Ask for a key combination. Calls onDone(accelerator) with a GTK
+     * accelerator string, or with '' when the user disables the shortcut.
+     */
+    _recordShortcut(window, title, onDone) {
+        const status = new Adw.StatusPage({
+            icon_name: 'preferences-desktop-keyboard-shortcuts-symbolic',
+            title: _('Press a key combination'),
+            description: _('Esc to cancel · Backspace to disable'),
+        });
+        const toolbar = new Adw.ToolbarView({content: status});
+        toolbar.add_top_bar(new Adw.HeaderBar());
+        const dialog = new Adw.Dialog({
+            title,
+            child: toolbar,
+            content_width: 440,
+        });
+
+        const keys = new Gtk.EventControllerKey({propagation_phase: Gtk.PropagationPhase.CAPTURE});
+        keys.connect('key-pressed', (_controller, keyval, keycode, state) => {
+            const result = interpretKeyPress(keyval, keycode, state);
+            switch (result.action) {
+            case 'wait':
+                break;
+            case 'reject':
+                status.description = result.reason === 'needs-modifier'
+                    ? _('Add Ctrl, Alt or Super so the shortcut does not fire while typing')
+                    : _('That key cannot be used as a shortcut');
+                break;
+            case 'cancel':
+                dialog.close();
+                break;
+            default:
+                onDone(result.accelerator ?? '');
+                dialog.close();
+            }
+            return Gdk.EVENT_STOP;
+        });
+        dialog.add_controller(keys);
+
+        // GNOME grabs keys like Print Screen and Super+S before any window sees
+        // them. Pause those grabs while recording, as GNOME Settings does.
+        const toplevel = window.get_surface();
+        dialog.connect('closed', () => toplevel?.restore_system_shortcuts());
+        dialog.present(window);
+        toplevel?.inhibit_system_shortcuts(null);
+    }
+
     _switchRow(settings, key, {title, subtitle}) {
         const row = new Adw.SwitchRow({title, subtitle});
         settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
@@ -269,3 +377,4 @@ export default class SmartScreenVisionPreferences extends ExtensionPreferences {
         return row;
     }
 }
+

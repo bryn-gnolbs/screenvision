@@ -72,5 +72,10 @@
       <summary>Show QR code button</summary>
       <description>Show the QR code button in the screenshot UI.</description>
     </key>
+    <key name="screenshot-shortcut" type="as">
+      <default>['Print']</default>
+      <summary>Screenshot shortcut</summary>
+      <description>Keyboard shortcut that opens the screenshot tool. When it matches GNOME's own screenshot shortcut, GNOME handles it. An empty list disables the extra shortcut.</description>
+    </key>
   </schema>
 </schemalist>

@@ -9,6 +9,8 @@ import {
     parseTesseractLanguages, runCommand, writePrivateTempFile,
 } from '../lib/common.js';
 import {parseTsv, wordsToText} from '../lib/ocrText.js';
+import {interpretKeyPress} from '../lib/shortcutKeys.js';
+import Gdk from 'gi://Gdk?version=4.0';
 
 const tests = [];
 const test = (name, fn) => tests.push({name, fn});
@@ -87,6 +89,26 @@ test('writePrivateTempFile creates an owner-only file in the runtime dir', () =>
 test('runCommand feeds stdin and captures output', async () => {
     const result = await runCommand(['cat'], {input: new TextEncoder().encode('piped')});
     assertEqual([result.success, result.stdout], [true, 'piped']);
+});
+
+test('interpretKeyPress records modifier combinations', () => {
+    const {SHIFT_MASK, SUPER_MASK, CONTROL_MASK, LOCK_MASK} = Gdk.ModifierType;
+    assertEqual(interpretKeyPress(Gdk.KEY_S, 0, SHIFT_MASK | SUPER_MASK),
+        {action: 'set', accelerator: '<Shift><Super>s'});
+    // Caps Lock must not end up in the shortcut.
+    assertEqual(interpretKeyPress(Gdk.KEY_p, 0, CONTROL_MASK | LOCK_MASK),
+        {action: 'set', accelerator: '<Control>p'});
+    assertEqual(interpretKeyPress(Gdk.KEY_Print, 0, 0), {action: 'set', accelerator: 'Print'});
+    assertEqual(interpretKeyPress(Gdk.KEY_F9, 0, 0), {action: 'set', accelerator: 'F9'});
+});
+
+test('interpretKeyPress handles waiting, cancelling and typing keys', () => {
+    const {SHIFT_MASK, SUPER_MASK} = Gdk.ModifierType;
+    assertEqual(interpretKeyPress(Gdk.KEY_Super_L, 0, SUPER_MASK), {action: 'wait'});
+    assertEqual(interpretKeyPress(Gdk.KEY_Escape, 0, 0), {action: 'cancel'});
+    assertEqual(interpretKeyPress(Gdk.KEY_BackSpace, 0, 0), {action: 'disable'});
+    assertEqual(interpretKeyPress(Gdk.KEY_s, 0, 0), {action: 'reject', reason: 'needs-modifier'});
+    assertEqual(interpretKeyPress(Gdk.KEY_S, 0, SHIFT_MASK), {action: 'reject', reason: 'needs-modifier'});
 });
 
 const loop = new GLib.MainLoop(null, false);

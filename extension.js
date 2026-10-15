@@ -15,6 +15,7 @@ import {
 
 import {captureSelection, isSelectionMode} from './capture.js';
 import {ScreenshotOCRController} from './ocr.js';
+import {ScreenshotShortcut} from './shortcut.js';
 import {LensUploader} from './uploader.js';
 import {
     deleteFile, hasProgram, logError, runCommand, writePrivateTempFile,
@@ -71,6 +72,7 @@ export default class SmartScreenVisionExtension extends Extension {
         this._injections = new InjectionManager();
         this._uploader = new LensUploader();
         this._ocr = new ScreenshotOCRController(this._settings, text => this._showToast(text));
+        this._shortcut = new ScreenshotShortcut(this._settings);
         this._toast = null;
         this._toastTimeoutId = 0;
 
@@ -95,6 +97,8 @@ export default class SmartScreenVisionExtension extends Extension {
         ui._selectionButton?.disconnectObject(this);
         ui.disconnectObject(this);
         this._settings.disconnectObject(this);
+        this._shortcut.destroy();
+        this._shortcut = null;
 
         this._restoreDefaultLayout(ui);
         this._lensButton?.destroy();
