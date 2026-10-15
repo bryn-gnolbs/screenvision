@@ -123,6 +123,11 @@ export default class ScreenVisionPreferences extends ExtensionPreferences {
             title: _('Recognise text'),
             subtitle: _('Highlight text in the selected area and offer Copy and Search.'),
         }));
+        group.add(this._switchRow(settings, 'read-whole-screen', {
+            title: _('Live selection'),
+            subtitle: _('Read the whole screen when the tool opens so text and suggestions update ' +
+                'while you drag. Runs entirely on this computer.'),
+        }));
         group.add(this._spinRow(settings, 'selection-confidence', {
             title: _('Minimum confidence'),
             subtitle: _('Lower values catch more text but add false positives.'),

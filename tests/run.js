@@ -10,7 +10,12 @@ import {
 import {normalizeLanguageSelection, parseTesseractLanguages, TesseractProvider} from '../lib/vision/tesseract.js';
 import {createProvider, listProviderIds} from '../lib/vision/index.js';
 import {wordsToStage} from '../lib/vision/provider.js';
-import {parseTsv, wordsToText} from '../lib/ocrText.js';
+import {planBands, mergeBandWords, recognizeInBands, chooseBandCount} from '../lib/vision/tiling.js';
+import {parseZbarXml, scanCodes, codesAvailable} from '../lib/vision/codes.js';
+import {ScreenContext} from '../lib/screenContext.js';
+import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
+import GdkPixbuf from 'gi://GdkPixbuf';
+import {hasLettersOrDigits, parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
 import {LensLauncher} from '../uploader.js';
 import Soup from 'gi://Soup?version=3.0';
@@ -183,6 +188,92 @@ test('Tesseract provider reads a real image (skipped without tesseract)', async 
     const [, png] = GLib.file_get_contents(path);
     const words = await provider.recognize(png, {languages: ['eng'], minConfidence: 10});
     assertEqual(wordsToText(words), 'Hello ScreenVision\nsecond line 42');
+});
+
+function fixture(name) {
+    const [testFile] = GLib.filename_from_uri(import.meta.url);
+    return GLib.build_filenamev([GLib.path_get_dirname(testFile), 'fixtures', name]);
+}
+
+test('planBands covers the image with overlapping, non-overlapping cores', () => {
+    const plan = planBands(1000, {bands: 4, overlap: 50});
+    assertEqual(plan.map(b => [b.coreTop, b.coreBottom]), [[0, 250], [250, 500], [500, 750], [750, 1000]]);
+    assertEqual(plan.map(b => [b.top, b.bottom]), [[0, 300], [200, 550], [450, 800], [700, 1000]]);
+    assertEqual(planBands(80, {bands: 4, overlap: 50}).length, 1);
+    assertEqual(chooseBandCount(1600, 16), 6);
+    assertEqual(chooseBandCount(1600, 2), 1);
+});
+
+test('mergeBandWords keeps each word once, from the band that owns it', () => {
+    const [first, second] = planBands(200, {bands: 2, overlap: 20});
+    const word = (y, text) => ({x: 0, y, width: 10, height: 10, text, lineKey: '1:1:1:1'});
+    // "edge" sits on the boundary (rows 95-105): both bands see it.
+    const merged = mergeBandWords([
+        {band: first, words: [word(10, 'top'), word(95, 'edge')]},
+        {band: second, words: [word(15, 'edge'), word(60, 'bottom')]},
+    ]);
+    assertEqual(merged.map(w => [w.text, w.y]), [['top', 10], ['edge', 95], ['bottom', 140]]);
+});
+
+test('banded recognition reads a page like a single pass (skipped without tesseract)', async () => {
+    const provider = new TesseractProvider();
+    if (!provider.isAvailable())
+        return;
+    await provider.prepare();
+    const pixbuf = GdkPixbuf.Pixbuf.new_from_file(fixture('page.png'));
+    const words = await recognizeInBands(provider, pixbuf,
+        {bands: 3, overlap: 48, languages: ['eng'], minConfidence: 10, singleThread: true});
+    assertEqual(wordsToText(words), [
+        'Invoices are due on Friday', 'Contact billing@example.com today',
+        'Portal https://example.com/portal', 'Reference number 48213',
+        'Thanks for choosing ScreenVision', 'Settings and privacy options',
+    ].join('\n'));
+});
+
+test('parseZbarXml reads code content and bounding boxes', () => {
+    const xml = "<symbol type='QR-Code' quality='1'><polygon points='+31,+41 +31,+218 +208,+218 +208,+41'/>" +
+        '<data><![CDATA[https://example.com]]></data></symbol>';
+    assertEqual(parseZbarXml(xml), [{type: 'QR-Code', data: 'https://example.com', x: 31, y: 41, width: 177, height: 177}]);
+});
+
+test('scanCodes finds both QR codes in the fixture (skipped without zbar)', async () => {
+    if (!codesAvailable())
+        return;
+    const [, png] = GLib.file_get_contents(fixture('qr-codes.png'));
+    const codes = await scanCodes(png);
+    assertEqual(codes.map(c => c.data).sort(),
+        ['WIFI:S:HomeNet;T:WPA;P:secret123;;', 'https://example.com/qr-test']);
+});
+
+test('ScreenContext selects words and codes by their centre', () => {
+    const context = new ScreenContext();
+    const w = (x, y, text, lineKey) => ({x, y, width: 20, height: 10, text, lineKey});
+    context.setScreen({
+        words: [w(10, 10, 'inside', 'a'), w(30, 10, 'too', 'a'), w(300, 300, 'outside', 'b')],
+        codes: [{data: 'qr', x: 50, y: 50, width: 20, height: 20}],
+    });
+    const rect = {x: 0, y: 0, width: 100, height: 100};
+    assertEqual(context.select(rect).text, 'inside too');
+    assertEqual(context.select(rect).codes.map(c => c.data), ['qr']);
+    context.setRefined(rect, [w(10, 10, 'sharper', 'z')]);
+    assertEqual(context.select(rect).text, 'sharper');
+    assertEqual(context.select({...rect, width: 101}).text, 'inside too');
+});
+
+test('suggestActions puts specific actions first and always offers Lens', () => {
+    const kinds = s => s.map(x => x.kind + (x.detail ? `(${x.detail})` : ''));
+    assertEqual(kinds(suggestActions({
+        text: 'Docs at https://example.com/docs. Mail me@example.org',
+        codes: [{data: String.raw`WIFI:S:HomeNet;T:WPA;P:p\;w;;`}],
+    })), ['copy-wifi-password(HomeNet)', 'open-url(example.com)', 'email', 'copy-text', 'search', 'lens']);
+    assertEqual(kinds(suggestActions({})), ['lens']);
+    assertEqual(findUrls('see www.gnome.org, and http://a.b/c).'), ['https://www.gnome.org', 'http://a.b/c']);
+    assertEqual(parseWifiCode(String.raw`WIFI:S:Cafe;T:WPA;P:p\;w;;`), {ssid: 'Cafe', password: 'p;w'});
+});
+
+test('hasLettersOrDigits drops symbol-only words', () => {
+    assertEqual(['|', '~—', 'é', '42', 'a-b', '…'].map(text => hasLettersOrDigits({text})),
+        [false, false, true, true, true, false]);
 });
 
 const loop = new GLib.MainLoop(null, false);

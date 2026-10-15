@@ -8,10 +8,13 @@ Samkit Jain, licensed under the GPL-3.0 like the original.
 
 ## Features
 
-- **Text recognition:** select an area and every recognised word is highlighted.
-  **Copy** puts the text on the clipboard; **Search** looks it up with your chosen engine.
-- **QR codes:** the grid button decodes QR codes and barcodes in the selection and
-  copies the content.
+- **Live selection:** when the screenshot tool opens, ScreenVision reads the whole screen
+  in the background (about half a second). While you drag, recognised words light up and
+  suggestions follow your selection instantly; when you let go, the selection is read again
+  at full detail. All of this runs on your computer.
+- **Smart suggestions:** the menu adapts to what you select: open links, copy a Wi-Fi
+  password from a QR code, write an email, **Copy** text, **Search** it, or ask **Lens**.
+- **QR codes:** codes on screen are found automatically; the grid button copies them too.
 - **Google Lens:** the magnifier button sends the selected area to Google Lens and opens
   the results in your browser.
 - **Your own shortcut:** open the screenshot tool with any key combination, such as

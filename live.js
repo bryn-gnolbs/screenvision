@@ -1,22 +1,29 @@
-// Text recognition inside the screenshot UI: sends the selected area to a
-// vision provider (see lib/vision), draws a highlight box around each
-// recognised word and shows a Copy / Search menu.
+// Live vision inside the screenshot UI. When the overlay opens, the whole
+// frozen screen is read in the background (text and codes, see lib/vision).
+// While the user drags a selection, highlights and suggested actions update
+// instantly from that reading; on release, the selection is read again at
+// full detail. Everything stays on this computer.
 
 import Clutter from 'gi://Clutter';
 import Cairo from 'gi://cairo';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {captureSelection, isSelectionMode} from './capture.js';
+import {captureScreen, captureSelection, isSelectionMode} from './capture.js';
 import {buildSearchUrl, clamp, logError, parseRgbaSetting} from './lib/common.js';
-import {wordsToText} from './lib/ocrText.js';
+import {suggestActions} from './lib/intents.js';
+import {hasLettersOrDigits} from './lib/ocrText.js';
+import {ScreenContext} from './lib/screenContext.js';
+import {scanCodes} from './lib/vision/codes.js';
 import {createProvider} from './lib/vision/index.js';
 import {wordsToStage} from './lib/vision/provider.js';
+import {chooseBandCount, recognizeInBands} from './lib/vision/tiling.js';
 
 const DEFAULT_STYLE = {
     fill: [0.10, 0.11, 0.13, 0.34],
@@ -27,6 +34,10 @@ const DEFAULT_STYLE = {
     padding: 3,
     borderWidth: 1.25,
 };
+
+const MAX_MENU_ACTIONS = 5;
+// Minimum confidence for words from the whole-screen read (0-100).
+const SCREEN_MIN_CONFIDENCE = 50;
 
 const OCRHighlightOverlay = GObject.registerClass(
 class OCRHighlightOverlay extends St.DrawingArea {
@@ -89,21 +100,26 @@ class OCRHighlightOverlay extends St.DrawingArea {
     }
 });
 
-export class ScreenshotOCRController {
+export class LiveVisionController {
     /**
      * @param {Gio.Settings} settings - extension settings
-     * @param {function(string): void} showMessage - shows a toast in the screenshot UI
+     * @param {object} hooks
+     * @param {function(string): void} hooks.showMessage - shows a toast in the screenshot UI
+     * @param {function(): void} hooks.searchWithLens - sends the selection to Google Lens
      */
-    constructor(settings, showMessage) {
+    constructor(settings, {showMessage, searchWithLens}) {
         this._settings = settings;
         this._showMessage = showMessage;
+        this._searchWithLens = searchWithLens;
         this._overlay = null;
         this._menuLayer = null;
         this._menu = null;
-        this._text = '';
-        this._words = [];
-        this._selectionKey = null;
-        this._cancellable = null;
+        this._status = null;
+        this._menuSignature = null;
+        this._selected = {words: [], codes: [], text: ''};
+        this._context = new ScreenContext();
+        this._screenCancellable = null;
+        this._refineCancellable = null;
         this._provider = createProvider();
         this._warnedUnavailable = false;
 
@@ -111,11 +127,7 @@ export class ScreenshotOCRController {
         this._settings.connectObject('changed', () => {
             this._reloadSettings();
             this._overlay?.setStyle(this._style);
-
-            if (this._config.enabled)
-                this.refreshSelection(Main.screenshotUI);
-            else
-                this.reset();
+            this.refreshSelection(Main.screenshotUI);
         }, this);
     }
 
@@ -128,14 +140,27 @@ export class ScreenshotOCRController {
         this._menuLayer?.destroy();
         this._menuLayer = null;
         this._menu = null;
+        this._status = null;
     }
 
-    /** Forget results and stop any running recognition. */
+    /** The current selection rectangle in stage coordinates, or null. */
+    selectionRect(ui) {
+        return this._getSelection(ui);
+    }
+
+    /** What ScreenVision currently knows about the screen. */
+    get context() {
+        return this._context;
+    }
+
+    /** Forget everything and stop any running recognition. */
     reset() {
-        this._cancellable?.cancel();
-        this._cancellable = null;
-        this._words = [];
-        this._selectionKey = null;
+        this._screenCancellable?.cancel();
+        this._screenCancellable = null;
+        this._refineCancellable?.cancel();
+        this._refineCancellable = null;
+        this._context.clear();
+        this._selected = {words: [], codes: [], text: ''};
 
         this._overlay?.setBoxes([]);
         this._hideMenu();
@@ -144,63 +169,55 @@ export class ScreenshotOCRController {
     /** Called each time the screenshot UI opens. */
     onOpened(ui) {
         this._ensureAttached(ui);
+        this.reset();
         this._warnedUnavailable = false;
-        this._provider.prepare?.().catch(e => logError('Preparing vision provider failed', e));
 
-        if (isSelectionMode(ui))
-            this.recognizeSelection(ui).catch(e => logError('OCR failed', e));
-        else
-            this.reset();
+        if (!this._config.enabled)
+            return;
+
+        if (this._config.readWholeScreen) {
+            this._readScreen(ui).catch(e => logError('Reading the screen failed', e));
+        } else {
+            this._provider.prepare?.().catch(e => logError('Preparing vision provider failed', e));
+            this.recognizeSelection(ui).catch(e => logError('Text recognition failed', e));
+        }
+        this.refreshSelection(ui);
     }
 
-    /** Re-position highlights while the selection rectangle moves. */
+    /**
+     * Update highlights and suggestions for the current selection. Called on
+     * every movement of the selection rectangle, so it only filters what is
+     * already known and never waits for recognition.
+     */
     refreshSelection(ui) {
-        if (!this._overlay || !ui || !this._config.enabled || !isSelectionMode(ui)) {
+        const selection = this._config.enabled ? this._getSelection(ui) : null;
+        if (!this._overlay || !selection) {
             this._overlay?.setBoxes([]);
             this._hideMenu();
             return;
         }
 
-        const selection = this._getSelection(ui);
-        if (!selection || this._makeKey(selection) !== this._selectionKey) {
-            // The selection changed since the last OCR run; hide stale boxes
-            // until the drag ends and recognizeSelection() runs again.
-            this._overlay.setBoxes([]);
-            this._hideMenu();
-            return;
-        }
-
+        this._selected = this._context.select(selection);
         this._overlay.set_size(global.stage.width, global.stage.height);
-        this._overlay.setBoxes(this._words);
+        this._overlay.setBoxes(this._selected.words);
         this._showMenu(selection);
     }
 
-    /** Run OCR on the current selection, unless it was already done. */
+    /**
+     * Read the current selection again at full detail and swap the result in.
+     * Runs when the user lets go of the selection.
+     */
     async recognizeSelection(ui) {
-        if (!this._config.enabled || !isSelectionMode(ui))
+        if (!this._config.enabled || !this._checkAvailable())
             return;
-
-        if (!this._provider.isAvailable()) {
-            if (!this._warnedUnavailable) {
-                this._warnedUnavailable = true;
-                this._showMessage(_('Install %s to recognise text').format(this._provider.name));
-            }
-            return;
-        }
 
         const selection = this._getSelection(ui);
-        const key = this._makeKey(selection);
-        if (!key)
+        if (!selection || this._context.hasRefined(selection))
             return;
 
-        if (key === this._selectionKey && this._words.length > 0) {
-            this.refreshSelection(ui);
-            return;
-        }
-
-        this.reset();
+        this._refineCancellable?.cancel();
         const cancellable = new Gio.Cancellable();
-        this._cancellable = cancellable;
+        this._refineCancellable = cancellable;
 
         try {
             const capture = await captureSelection(ui);
@@ -216,21 +233,89 @@ export class ScreenshotOCRController {
             if (cancellable.is_cancelled())
                 return;
 
-            this._words = wordsToStage(words, {
+            this._context.setRefined(selection, wordsToStage(words, {
                 scale: ui._scale * resizeScale,
                 offsetX: selection.x,
                 offsetY: selection.y,
-            });
-            this._text = wordsToText(this._words);
-            this._selectionKey = key;
+            }));
             this.refreshSelection(ui);
         } catch (e) {
             if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 throw e;
         } finally {
-            if (this._cancellable === cancellable)
-                this._cancellable = null;
+            if (this._refineCancellable === cancellable)
+                this._refineCancellable = null;
         }
+    }
+
+    /**
+     * Recognise all text and codes on the frozen screen in the background, so
+     * that selections can be answered instantly. Nothing leaves the computer.
+     */
+    async _readScreen(ui) {
+        if (!this._checkAvailable())
+            return;
+
+        const cancellable = new Gio.Cancellable();
+        this._screenCancellable = cancellable;
+        this._context.status = 'reading';
+
+        try {
+            const [capture] = await Promise.all([
+                captureScreen(ui),
+                this._provider.prepare?.(),
+            ]);
+            if (cancellable.is_cancelled())
+                return;
+
+            // Whole screens mix light and dark areas and contain icons and
+            // wallpaper, so read them with local thresholding and stricter
+            // filtering than a selection.
+            const options = {
+                languages: this._config.languages,
+                minConfidence: Math.max(this._config.confidence, SCREEN_MIN_CONFIDENCE),
+                adaptiveThreshold: true,
+                cancellable,
+            };
+            const height = capture.pixbuf.get_height();
+            const [words, codes] = await Promise.all([
+                this._provider.prefersBands
+                    ? recognizeInBands(this._provider, capture.pixbuf, {
+                        ...options,
+                        bands: chooseBandCount(height, GLib.get_num_processors()),
+                        overlap: Math.round(48 * ui._scale),
+                        singleThread: true,
+                    })
+                    : this._provider.recognize(capture.png, options),
+                scanCodes(capture.png, {cancellable}),
+            ]);
+            if (cancellable.is_cancelled())
+                return;
+
+            const toStage = {scale: ui._scale, offsetX: 0, offsetY: 0};
+            this._context.setScreen({
+                words: wordsToStage(words.filter(hasLettersOrDigits), toStage),
+                codes: wordsToStage(codes, toStage),
+            });
+            this.refreshSelection(ui);
+        } catch (e) {
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                throw e;
+        } finally {
+            if (this._screenCancellable === cancellable)
+                this._screenCancellable = null;
+        }
+    }
+
+    _checkAvailable() {
+        if (this._provider.isAvailable())
+            return true;
+
+        if (!this._warnedUnavailable) {
+            this._warnedUnavailable = true;
+            this._showMessage(_('Install %s to recognise text').format(this._provider.name));
+        }
+        return false;
     }
 
     /** Shrink very large selections so recognition stays fast. */
@@ -273,23 +358,9 @@ export class ScreenshotOCRController {
                 visible: false,
                 reactive: true,
             });
-            this._menu.add_child(this._makeMenuButton(_('Copy'), () => this._copyText()));
-            this._menu.add_child(this._makeMenuButton(_('Search'), () => this._searchText()));
             this._menuLayer.add_child(this._menu);
-
             ui.insert_child_above(this._menuLayer, ui._areaSelector);
         }
-    }
-
-    _makeMenuButton(label, onClicked) {
-        const button = new St.Button({
-            label,
-            style_class: 'ssv-text-menu-button',
-            can_focus: true,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        button.connect('clicked', onClicked);
-        return button;
     }
 
     _getSelection(ui) {
@@ -304,18 +375,35 @@ export class ScreenshotOCRController {
         return {x, y, width, height};
     }
 
-    _makeKey(selection) {
-        if (!selection)
-            return null;
-
-        return [selection.x, selection.y, selection.width, selection.height]
-            .map(Math.round).join(':');
-    }
-
+    /** Rebuild the buttons only when the suggestions change, then place the menu. */
     _showMenu(selection) {
-        if (!this._menu || this._words.length === 0) {
-            this._hideMenu();
+        if (!this._menu)
             return;
+
+        const reading = this._context.status === 'reading' && this._selected.words.length === 0;
+        const suggestions = suggestActions(this._selected).slice(0, MAX_MENU_ACTIONS);
+        const signature = JSON.stringify([reading, suggestions]);
+
+        if (signature !== this._menuSignature) {
+            this._menuSignature = signature;
+            this._menu.destroy_all_children();
+            if (reading) {
+                this._menu.add_child(new St.Label({
+                    text: _('Reading screen…'),
+                    style_class: 'ssv-text-menu-status',
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
+            for (const suggestion of suggestions) {
+                const button = new St.Button({
+                    label: this._labelFor(suggestion),
+                    style_class: 'ssv-text-menu-button',
+                    can_focus: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                });
+                button.connect('clicked', () => this._runAction(suggestion));
+                this._menu.add_child(button);
+            }
         }
 
         const [, menuWidth] = this._menu.get_preferred_width(-1);
@@ -332,30 +420,70 @@ export class ScreenshotOCRController {
         this._menu?.hide();
     }
 
-    _copyText() {
-        if (!this._text)
-            return;
+    _labelFor({kind, detail}) {
+        switch (kind) {
+        case 'open-url':
+            return _('Open %s').format(detail);
+        case 'copy-wifi-password':
+            return detail ? _('Copy Wi-Fi password (%s)').format(detail) : _('Copy Wi-Fi password');
+        case 'copy-code':
+            return _('Copy QR content');
+        case 'email':
+            return _('Write email');
+        case 'copy-text':
+            return _('Copy');
+        case 'search':
+            return _('Search');
+        case 'lens':
+            return _('Lens');
+        default:
+            return kind;
+        }
+    }
 
+    _runAction({kind, value}) {
+        switch (kind) {
+        case 'open-url':
+            this._openUri(value);
+            break;
+        case 'email':
+            this._openUri(`mailto:${value}`);
+            break;
+        case 'search':
+            this._openUri(buildSearchUrl(this._config.searchEngine, value));
+            break;
+        case 'copy-text':
+            this._copy(value, _('Text copied'), this._config.closeAfterCopy);
+            break;
+        case 'copy-code':
+            this._copy(value, _('QR content copied'), false);
+            break;
+        case 'copy-wifi-password':
+            this._copy(value, _('Wi-Fi password copied'), false);
+            break;
+        case 'lens':
+            this._searchWithLens();
+            break;
+        }
+    }
+
+    _copy(text, message, closeAfter) {
         const clipboard = St.Clipboard.get_default();
-        clipboard.set_text(St.ClipboardType.CLIPBOARD, this._text);
-        clipboard.set_text(St.ClipboardType.PRIMARY, this._text);
-        this._showMessage(_('Text copied'));
+        clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
+        clipboard.set_text(St.ClipboardType.PRIMARY, text);
+        this._showMessage(message);
 
-        if (this._config.closeAfterCopy)
+        if (closeAfter)
             Main.screenshotUI?.close();
     }
 
-    _searchText() {
-        if (!this._text)
-            return;
-
+    _openUri(uri) {
         try {
-            Gio.AppInfo.launch_default_for_uri(
-                buildSearchUrl(this._config.searchEngine, this._text), null);
+            Gio.AppInfo.launch_default_for_uri(uri, null);
             Main.screenshotUI?.close();
         } catch (e) {
-            logError('Opening search failed', e);
-            this._showMessage(_('Could not open the browser'));
+            logError(`Opening ${uri} failed`, e);
+            this._showMessage(_('Could not open %s').format(uri));
         }
     }
 
@@ -374,6 +502,7 @@ export class ScreenshotOCRController {
 
         this._config = {
             enabled: s.get_boolean('ocr-enabled'),
+            readWholeScreen: s.get_boolean('read-whole-screen'),
             confidence: clamp(s.get_int('selection-confidence'), 0, 99),
             maxEdge: clamp(s.get_int('selection-max-edge'), 800, 4096),
             languages: s.get_strv('ocr-languages'),
@@ -384,7 +513,7 @@ export class ScreenshotOCRController {
 }
 
 /**
- * Pick a spot for the Copy/Search menu: below the selection, then above, then
+ * Pick a spot for the suggestions menu: below the selection, then above, then
  * either side, skipping spots that leave the screen or cover the screenshot
  * toolbar.
  */

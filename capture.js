@@ -36,6 +36,31 @@ export async function captureSelection(ui) {
     return {pixbuf, png: stream.steal_as_bytes().toArray()};
 }
 
+/**
+ * Encode the entire frozen frame (every monitor) as a PNG, at full
+ * resolution.
+ *
+ * @param {object} ui - Main.screenshotUI
+ * @returns {Promise<{pixbuf: object, png: Uint8Array}>}
+ */
+export async function captureScreen(ui) {
+    const texture = ui._stageScreenshot?.get_content()?.get_texture();
+    if (!texture)
+        throw new Error('The screenshot UI has no frozen frame');
+
+    const stream = Gio.MemoryOutputStream.new_resizable();
+    const pixbuf = await Shell.Screenshot.composite_to_stream(
+        texture,
+        0, 0, texture.get_width(), texture.get_height(),
+        ui._scale,
+        null, 0, 0, 1,
+        stream
+    );
+    stream.close(null);
+
+    return {pixbuf, png: stream.steal_as_bytes().toArray()};
+}
+
 export function isSelectionMode(ui) {
     return Boolean(ui?._selectionButton?.checked);
 }

@@ -24,6 +24,7 @@ EXT_DIR="$XDG_DATA_HOME/gnome-shell/extensions"
 mkdir -p "$EXT_DIR/screenvision@genolabs.net" "$EXT_DIR/ssv-smoke-driver@test"
 unzip -q "$ZIP" -d "$EXT_DIR/screenvision@genolabs.net"
 cp "$PROJECT"/tests/smoke/driver/* "$EXT_DIR/ssv-smoke-driver@test/"
+cp "$PROJECT"/tests/fixtures/qr-codes.png "$EXT_DIR/ssv-smoke-driver@test/"
 unset WAYLAND_DISPLAY DISPLAY
 
 timeout 120 dbus-run-session -- bash -c '

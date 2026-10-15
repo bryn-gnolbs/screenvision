@@ -14,12 +14,11 @@ import {
 } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {captureSelection, isSelectionMode} from './capture.js';
-import {ScreenshotOCRController} from './ocr.js';
+import {LiveVisionController} from './live.js';
 import {ScreenshotShortcut} from './shortcut.js';
 import {LensLauncher} from './uploader.js';
-import {
-    deleteFile, hasProgram, logError, runCommand, writePrivateTempFile,
-} from './lib/common.js';
+import {logError} from './lib/common.js';
+import {codesAvailable, scanCodes} from './lib/vision/codes.js';
 
 const TOAST_TIMEOUT_MS = 1800;
 const NOTIFY_PREVIEW_CHARS = 120;
@@ -71,7 +70,10 @@ export default class ScreenVisionExtension extends Extension {
         this._settings = this.getSettings();
         this._injections = new InjectionManager();
         this._lens = new LensLauncher();
-        this._ocr = new ScreenshotOCRController(this._settings, text => this._showToast(text));
+        this._live = new LiveVisionController(this._settings, {
+            showMessage: text => this._showToast(text),
+            searchWithLens: () => this._searchWithLens(ui).catch(e => logError('Google Lens', e)),
+        });
         this._shortcut = new ScreenshotShortcut(this._settings);
         this._toast = null;
         this._toastTimeoutId = 0;
@@ -113,49 +115,46 @@ export default class ScreenVisionExtension extends Extension {
         this._toast?.destroy();
         this._toast = null;
 
-        this._ocr.destroy();
-        this._ocr = null;
+        this._live.destroy();
+        this._live = null;
         this._lens.destroy();
         this._lens = null;
         this._settings = null;
     }
 
     _hookScreenshotUI(ui) {
-        const ocr = this._ocr;
+        const live = this._live;
 
-        // Run OCR each time the screenshot tool opens.
+        // Start reading the screen each time the screenshot tool opens.
         this._injections.overrideMethod(ui, 'open', original => {
             return async function (...args) {
                 const result = await original.apply(this, args);
-                ocr.onOpened(this);
+                live.onOpened(this);
                 return result;
             };
         });
 
-        // Keep highlights in sync while the selection rectangle is dragged.
+        // Update highlights and suggestions on every move of the selection.
         if (ui._areaSelector) {
             this._injections.overrideMethod(ui._areaSelector, '_updateSelectionRect', original => {
                 return function (...args) {
                     const result = original.apply(this, args);
-                    ocr.refreshSelection(ui);
+                    live.refreshSelection(ui);
                     return result;
                 };
             });
 
+            // On release, read the selection again at full detail.
             ui._areaSelector.connectObject('drag-ended', () => {
-                ocr.recognizeSelection(ui).catch(e => logError('OCR failed', e));
+                live.recognizeSelection(ui).catch(e => logError('Text recognition failed', e));
             }, this);
         }
 
-        // Switching back to selection mode should show text straight away.
-        ui._selectionButton?.connectObject('notify::checked', () => {
-            if (isSelectionMode(ui))
-                ocr.recognizeSelection(ui).catch(e => logError('OCR failed', e));
-            else
-                ocr.reset();
-        }, this);
+        // Hide or show suggestions when switching modes; the screen reading
+        // is kept, so returning to selection mode is instant.
+        ui._selectionButton?.connectObject('notify::checked', () => live.refreshSelection(ui), this);
 
-        ui.connectObject('closed', () => ocr.reset(), this);
+        ui.connectObject('closed', () => live.reset(), this);
     }
 
     _createButtons(ui) {
@@ -286,31 +285,25 @@ export default class ScreenVisionExtension extends Extension {
             this._showToast(_('Select an area to scan for QR codes'));
             return;
         }
-        if (!hasProgram('zbarimg')) {
+        if (!codesAvailable()) {
             this._showToast(_('Install zbar (zbarimg) to scan QR codes'));
             return;
         }
 
-        const capture = await captureSelection(ui);
-        if (!capture)
-            return;
-
-        // zbarimg only reads files, so use a private temporary one.
-        const path = writePrivateTempFile(capture.png, '.png');
-        let result;
-        try {
-            result = await runCommand(['zbarimg', '--quiet', '--raw', path]);
-        } finally {
-            deleteFile(path);
+        // Codes found when the screen was read are instant; otherwise scan
+        // the selection itself (small codes read better close up).
+        let codes = this._live.context.select(this._live.selectionRect(ui)).codes;
+        if (codes.length === 0) {
+            const capture = await captureSelection(ui);
+            codes = capture ? await scanCodes(capture.png) : [];
         }
 
-        // zbarimg exits with 4 when the image simply contains no code.
-        const content = result.stdout.trim();
-        if (!content) {
+        if (codes.length === 0) {
             this._showToast(_('No QR code found in the selection'));
             return;
         }
 
+        const content = codes.map(code => code.data).join('\n');
         St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, content);
         ui.close();
 

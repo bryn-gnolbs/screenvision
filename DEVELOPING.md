@@ -42,13 +42,17 @@ A field guide for people who know Python but are new to GNOME Shell extensions.
 
 ```
 extension.js      Entry point: hooks the screenshot UI, adds the Lens and QR buttons, toasts
-ocr.js            Text-recognition UI: highlight boxes and Copy/Search menu (asks a vision provider)
+live.js           Live vision UI: reads the whole screen on open, live highlights and suggestions while
+                  dragging, sharper read on release
 capture.js        Grabs the selected area from the screenshot UI's frozen frame as PNG
 uploader.js       Google Lens hand-off: one-time 127.0.0.1 page that makes the browser upload
 shortcut.js       Optional extra keyboard shortcut that opens the screenshot tool
 prefs.js          Preferences window (separate GTK process)
 lib/common.js     Shared helpers: subprocesses, temp files, settings parsing
-lib/vision/       Vision providers: provider.js (contract), tesseract.js, index.js (registry)
+lib/vision/       Vision providers: provider.js (contract), tesseract.js, index.js (registry),
+                  tiling.js (parallel bands for whole screens), codes.js (QR/barcodes via zbar)
+lib/screenContext.js  What is known about the current screen; answers "what's in this rectangle?"
+lib/intents.js    Suggested actions for a selection (open link, Wi-Fi password, copy, search, Lens...)
 lib/ocrText.js    Pure TSV → words → text logic (unit-tested)
 lib/shortcutKeys.js  Key press → shortcut string for the prefs picker (GTK, unit-tested)
 stylesheet.css    St widget styling (loaded automatically by the shell)
@@ -57,10 +61,27 @@ tests/run.js      Unit tests, run with plain gjs
 tests/smoke/      End-to-end test in a throwaway headless GNOME Shell
 ```
 
+## How live vision works
+
+1. **Overlay opens:** `live.js` captures the whole frozen frame and, in parallel,
+   scans it for QR codes/barcodes (`codes.js`, ~0.1 s) and reads all text
+   (`tiling.js` splits it into bands read by several single-threaded Tesseract
+   processes, ~0.5-0.7 s on a 2560x1600 screen). Whole-screen reads use
+   adaptive thresholding (light and dark areas mix) and drop low-confidence and
+   symbol-only words. Results go into a `ScreenContext`.
+2. **Dragging:** every movement of the selection asks the context what lies
+   inside the rectangle - plain in-memory filtering, so highlights, text and
+   suggestions (`intents.js`) update instantly.
+3. **Release:** the selection is read again at full detail with default
+   settings and replaces the whole-screen words for that exact rectangle.
+
+The context is what the assistant will receive later. It never leaves the
+computer unless the user acts.
+
 ## Vision providers
 
 Text recognition goes through a small interface so the engine can be swapped
-without touching the UI. `ocr.js` captures the selection, calls
+without touching the UI. `live.js` captures the screen or selection, calls
 `provider.recognize(png, {languages, minConfidence, cancellable})`, and gets back
 words with boxes in image pixels; it then maps them onto the screen.
 

@@ -38,11 +38,15 @@ async function saveScreenshot(name) {
     stream.close(null);
 }
 
-function selectArea(ui, x1, y1, x2, y2) {
+// Move the selection rectangle as a drag would, without releasing.
+function moveSelection(ui, x1, y1, x2, y2) {
     const selector = ui._areaSelector;
     [selector._startX, selector._startY, selector._lastX, selector._lastY] = [x1, y1, x2, y2];
     selector._updateSelectionRect();
-    selector.emit('drag-ended');
+}
+
+function menuLabels(live) {
+    return live._menu.get_children().map(child => child.label ?? child.text);
 }
 
 // Created once, early: key presses sent right after creating a virtual
@@ -72,27 +76,61 @@ async function run() {
     });
     Main.layoutManager.uiGroup.add_child(label);
     label.set_position(300, 300);
+
+    // A QR image (link + Wi-Fi codes) lower on the screen.
+    const qrFile = GLib.build_filenamev([GLib.path_get_dirname(GLib.filename_from_uri(import.meta.url)[0]), 'qr-codes.png']);
+    const qrImage = new St.Widget({
+        style: `background-image: url("file://${qrFile}"); background-size: 620px 260px;`,
+        width: 620,
+        height: 260,
+    });
+    Main.layoutManager.uiGroup.add_child(qrImage);
+    qrImage.set_position(300, 560);
     await sleep(500);
 
     const ui = Main.screenshotUI;
     await ui.open();
     ui._selectionButton.checked = true;
-    selectArea(ui, 280, 280, 1200, 420);
-    await sleep(4000);
+    const live = () => ext()._live;
 
-    check('ocr text', ext()._ocr._text === SAMPLE_TEXT, ext()._ocr._text);
-    check('text menu shown', ext()._ocr._menu.visible, ext()._ocr._menu.get_position());
+    // The whole screen is read in the background right after opening.
+    for (let i = 0; i < 50 && live().context.status !== 'ready'; i++)
+        await sleep(100);
+    check('whole screen read on open', live().context.status === 'ready' && live().context.words.length > 0,
+        {status: live().context.status, words: live().context.words.length, codes: live().context.codes.length});
+
+    // Live: while dragging (no release yet) the selection already has its text.
+    moveSelection(ui, 280, 280, 1200, 420);
+    check('text is live while dragging', live()._selected.text === SAMPLE_TEXT, live()._selected.text);
+    check('suggestions shown while dragging', live()._menu.visible, menuLabels(live()));
+    check('suggestions offer copy, search and lens',
+        ['Copy', 'Search', 'Lens'].every(l => menuLabels(live()).includes(l)), menuLabels(live()));
+
+    // Release: the selection is read again at full detail.
+    ui._areaSelector.emit('drag-ended');
+    for (let i = 0; i < 30 && !live().context.hasRefined(live().selectionRect(ui)); i++)
+        await sleep(100);
+    check('sharper read after release', live().context.hasRefined(live().selectionRect(ui)) &&
+        live()._selected.text === SAMPLE_TEXT, live()._selected.text);
     check('lens button shown', ext()._lensButton.visible);
     check('qr button in side column', ext()._qrButton.get_parent() === ext()._sideBox);
-    await saveScreenshot('ocr.png');
+    await saveScreenshot('live-text.png');
 
     await ext()._scanQrCode(ui);
     check('qr reports no code', ext()._toast?.text === 'No QR code found in the selection', ext()._toast?.text);
 
-    ext()._ocr._copyText();
+    live()._runAction({kind: 'copy-text', value: live()._selected.text});
     const clip = await new Promise(resolve =>
         St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_c, text) => resolve(text)));
     check('copy puts text on clipboard', clip === SAMPLE_TEXT, clip);
+
+    // QR codes are found automatically and turned into suggestions.
+    moveSelection(ui, 290, 550, 940, 830);
+    check('qr codes detected automatically', live()._selected.codes.length === 2,
+        live()._selected.codes.map(c => c.data));
+    check('qr suggestions offered', menuLabels(live()).includes('Open example.com') &&
+        menuLabels(live()).includes('Copy Wi-Fi password (HomeNet)'), menuLabels(live()));
+    await saveScreenshot('live-qr.png');
 
     ui.close();
     await sleep(800);

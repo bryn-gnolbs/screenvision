@@ -37,6 +37,11 @@
       <summary>Enable OCR highlighting</summary>
       <description>Enable OCR processing and highlight rendering in the screenshot UI.</description>
     </key>
+    <key name="read-whole-screen" type="b">
+      <default>true</default>
+      <summary>Read the whole screen</summary>
+      <description>Recognise all text and codes on the screen when the screenshot tool opens, so selections update instantly while dragging. Runs locally.</description>
+    </key>
     <key name="selection-confidence" type="i">
       <default>10</default>
       <summary>OCR confidence threshold</summary>
