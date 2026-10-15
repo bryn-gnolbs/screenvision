@@ -42,12 +42,13 @@ A field guide for people who know Python but are new to GNOME Shell extensions.
 
 ```
 extension.js      Entry point: hooks the screenshot UI, adds the Lens and QR buttons, toasts
-ocr.js            OCR controller: runs Tesseract, draws highlight boxes, Copy/Search menu
+ocr.js            Text-recognition UI: highlight boxes and Copy/Search menu (asks a vision provider)
 capture.js        Grabs the selected area from the screenshot UI's frozen frame as PNG
 uploader.js       Google Lens hand-off: one-time 127.0.0.1 page that makes the browser upload
 shortcut.js       Optional extra keyboard shortcut that opens the screenshot tool
 prefs.js          Preferences window (separate GTK process)
-lib/common.js     Shared helpers: subprocesses, temp files, Tesseract languages, settings parsing
+lib/common.js     Shared helpers: subprocesses, temp files, settings parsing
+lib/vision/       Vision providers: provider.js (contract), tesseract.js, index.js (registry)
 lib/ocrText.js    Pure TSV → words → text logic (unit-tested)
 lib/shortcutKeys.js  Key press → shortcut string for the prefs picker (GTK, unit-tested)
 stylesheet.css    St widget styling (loaded automatically by the shell)
@@ -55,6 +56,26 @@ schemas/          GSettings schema: every user setting is declared here
 tests/run.js      Unit tests, run with plain gjs
 tests/smoke/      End-to-end test in a throwaway headless GNOME Shell
 ```
+
+## Vision providers
+
+Text recognition goes through a small interface so the engine can be swapped
+without touching the UI. `ocr.js` captures the selection, calls
+`provider.recognize(png, {languages, minConfidence, cancellable})`, and gets back
+words with boxes in image pixels; it then maps them onto the screen.
+
+To add a provider (for example an AI model running locally or on a server):
+
+1. Create `lib/vision/<name>.js` implementing the contract documented in
+   `lib/vision/provider.js` (`id`, `name`, `isAvailable()`, optional `prepare()`,
+   `recognize()`).
+2. Register it in `FACTORIES` in `lib/vision/index.js`.
+3. Add unit tests in `tests/run.js`. `tests/fixtures/two-lines.png` is a ready-made
+   test image.
+
+Keep providers free of GNOME Shell imports (only `gi://` modules) so they can be
+unit-tested with plain `gjs`. A remote provider would use `Soup.Session` for
+HTTP, as the tests in `tests/run.js` do.
 
 ## How it hooks the screenshot tool
 

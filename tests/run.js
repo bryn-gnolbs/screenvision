@@ -5,9 +5,11 @@ import GLib from 'gi://GLib';
 import System from 'system';
 
 import {
-    buildSearchUrl, deleteFile, normalizeLanguageSelection, parseRgbaSetting,
-    parseTesseractLanguages, runCommand, writePrivateTempFile,
+    buildSearchUrl, deleteFile, parseRgbaSetting, runCommand, writePrivateTempFile,
 } from '../lib/common.js';
+import {normalizeLanguageSelection, parseTesseractLanguages, TesseractProvider} from '../lib/vision/tesseract.js';
+import {createProvider, listProviderIds} from '../lib/vision/index.js';
+import {wordsToStage} from '../lib/vision/provider.js';
 import {parseTsv, wordsToText} from '../lib/ocrText.js';
 import {interpretKeyPress} from '../lib/shortcutKeys.js';
 import {LensLauncher} from '../uploader.js';
@@ -155,6 +157,32 @@ test('Lens hand-off serves the page and exact image, then shuts down', async () 
     await wait(400);
     assertEqual(launcher._handoffs.size, 0);
     launcher.destroy();
+});
+
+test('wordsToStage maps image pixels to the screen', () => {
+    const words = [{x: 20, y: 10, width: 40, height: 20, text: 'hi', lineKey: 'a'}];
+    assertEqual(wordsToStage(words, {scale: 2, offsetX: 100, offsetY: 50}),
+        [{x: 110, y: 55, width: 20, height: 10, text: 'hi', lineKey: 'a'}]);
+});
+
+test('vision registry creates providers and falls back to Tesseract', () => {
+    assertEqual(listProviderIds().includes('tesseract'), true);
+    assertEqual(createProvider('tesseract').id, 'tesseract');
+    assertEqual(createProvider('does-not-exist').id, 'tesseract');
+});
+
+test('Tesseract provider reads a real image (skipped without tesseract)', async () => {
+    const provider = new TesseractProvider();
+    if (!provider.isAvailable()) {
+        print('     (skipped: tesseract not installed)');
+        return;
+    }
+    await provider.prepare();
+    const [testFile] = GLib.filename_from_uri(import.meta.url);
+    const path = GLib.build_filenamev([GLib.path_get_dirname(testFile), 'fixtures', 'two-lines.png']);
+    const [, png] = GLib.file_get_contents(path);
+    const words = await provider.recognize(png, {languages: ['eng'], minConfidence: 10});
+    assertEqual(wordsToText(words), 'Hello ScreenVision\nsecond line 42');
 });
 
 const loop = new GLib.MainLoop(null, false);

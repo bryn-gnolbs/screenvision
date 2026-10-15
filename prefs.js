@@ -11,9 +11,9 @@ import {
 } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 import {
-    SEARCH_ENGINES, formatRgbaSetting, hasProgram, listTesseractLanguages,
-    normalizeLanguageSelection, parseRgbaSetting,
+    SEARCH_ENGINES, formatRgbaSetting, hasProgram, parseRgbaSetting,
 } from './lib/common.js';
+import {listTesseractLanguages, normalizeLanguageSelection} from './lib/vision/tesseract.js';
 import {interpretKeyPress} from './lib/shortcutKeys.js';
 
 export default class ScreenVisionPreferences extends ExtensionPreferences {

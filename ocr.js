@@ -1,5 +1,6 @@
-// OCR inside the screenshot UI: runs Tesseract on the selected area, draws a
-// highlight box around each recognised word and shows a Copy / Search menu.
+// Text recognition inside the screenshot UI: sends the selected area to a
+// vision provider (see lib/vision), draws a highlight box around each
+// recognised word and shows a Copy / Search menu.
 
 import Clutter from 'gi://Clutter';
 import Cairo from 'gi://cairo';
@@ -12,11 +13,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {captureSelection, isSelectionMode} from './capture.js';
-import {
-    buildSearchUrl, clamp, hasProgram, listTesseractLanguages, logError,
-    normalizeLanguageSelection, parseRgbaSetting, runCommand,
-} from './lib/common.js';
-import {parseTsv, wordsToText} from './lib/ocrText.js';
+import {buildSearchUrl, clamp, logError, parseRgbaSetting} from './lib/common.js';
+import {wordsToText} from './lib/ocrText.js';
+import {createProvider} from './lib/vision/index.js';
+import {wordsToStage} from './lib/vision/provider.js';
 
 const DEFAULT_STYLE = {
     fill: [0.10, 0.11, 0.13, 0.34],
@@ -27,11 +27,6 @@ const DEFAULT_STYLE = {
     padding: 3,
     borderWidth: 1.25,
 };
-
-// Tesseract page segmentation modes, tried in order until one finds words.
-// Automatic layout (3) handles text on mixed backgrounds and keeps reading
-// order; sparse text (11) catches scattered labels that 3 sometimes misses.
-const TESSERACT_PAGE_MODES = ['3', '11'];
 
 const OCRHighlightOverlay = GObject.registerClass(
 class OCRHighlightOverlay extends St.DrawingArea {
@@ -109,8 +104,8 @@ export class ScreenshotOCRController {
         this._words = [];
         this._selectionKey = null;
         this._cancellable = null;
-        this._installedLanguages = Promise.resolve(null);
-        this._warnedMissingTesseract = false;
+        this._provider = createProvider();
+        this._warnedUnavailable = false;
 
         this._reloadSettings();
         this._settings.connectObject('changed', () => {
@@ -149,10 +144,8 @@ export class ScreenshotOCRController {
     /** Called each time the screenshot UI opens. */
     onOpened(ui) {
         this._ensureAttached(ui);
-        this._warnedMissingTesseract = false;
-
-        // Language packs can be installed while the shell runs, so re-check.
-        this._installedLanguages = listTesseractLanguages();
+        this._warnedUnavailable = false;
+        this._provider.prepare?.().catch(e => logError('Preparing vision provider failed', e));
 
         if (isSelectionMode(ui))
             this.recognizeSelection(ui).catch(e => logError('OCR failed', e));
@@ -187,10 +180,10 @@ export class ScreenshotOCRController {
         if (!this._config.enabled || !isSelectionMode(ui))
             return;
 
-        if (!hasProgram('tesseract')) {
-            if (!this._warnedMissingTesseract) {
-                this._warnedMissingTesseract = true;
-                this._showMessage(_('Install Tesseract to recognise text'));
+        if (!this._provider.isAvailable()) {
+            if (!this._warnedUnavailable) {
+                this._warnedUnavailable = true;
+                this._showMessage(_('Install %s to recognise text').format(this._provider.name));
             }
             return;
         }
@@ -215,29 +208,19 @@ export class ScreenshotOCRController {
                 return;
 
             const {png, resizeScale} = this._prepareForOcr(capture);
-            const languages = normalizeLanguageSelection(
-                this._config.languages, await this._installedLanguages);
+            const words = await this._provider.recognize(png, {
+                languages: this._config.languages,
+                minConfidence: this._config.confidence,
+                cancellable,
+            });
+            if (cancellable.is_cancelled())
+                return;
 
-            for (const pageMode of TESSERACT_PAGE_MODES) {
-                const result = await runCommand(
-                    ['tesseract', 'stdin', 'stdout', '-l', languages.join('+'),
-                        '--psm', pageMode, 'tsv'],
-                    {input: png, cancellable});
-
-                if (cancellable.is_cancelled())
-                    return;
-                if (!result.success)
-                    throw new Error(result.stderr.trim() || `tesseract exited with ${result.status}`);
-
-                this._words = parseTsv(result.stdout, {
-                    scale: ui._scale * resizeScale,
-                    offsetX: selection.x,
-                    offsetY: selection.y,
-                    minConfidence: this._config.confidence,
-                });
-                if (this._words.length > 0)
-                    break;
-            }
+            this._words = wordsToStage(words, {
+                scale: ui._scale * resizeScale,
+                offsetX: selection.x,
+                offsetY: selection.y,
+            });
             this._text = wordsToText(this._words);
             this._selectionKey = key;
             this.refreshSelection(ui);
@@ -250,7 +233,7 @@ export class ScreenshotOCRController {
         }
     }
 
-    /** Shrink very large selections so Tesseract stays fast. */
+    /** Shrink very large selections so recognition stays fast. */
     _prepareForOcr({pixbuf, png}) {
         const width = pixbuf.get_width();
         const height = pixbuf.get_height();
