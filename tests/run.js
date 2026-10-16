@@ -17,6 +17,7 @@ import {ScreenContext} from '../lib/screenContext.js';
 import {suggestActions, findUrls, parseWifiCode} from '../lib/intents.js';
 import {describeSelection, shorten, fill} from '../lib/narration.js';
 import {renderTokens, tokenize} from '../ui/textReveal.js';
+import {markdownMarkup, plainText} from '../ui/markdown.js';
 import {
     ClickCounter, boundingRect, lineHighlights, lineRange, nearestWord, selectedWords, wordAt,
 } from '../lib/textSelection.js';
@@ -303,6 +304,11 @@ test('shorten cuts at a word boundary and fill replaces placeholders', () => {
     assertEqual(shorten('alpha beta gamma delta', 16), 'alpha beta…');
     assertEqual(shorten('short', 16), 'short');
     assertEqual(fill('%d lines in %s', 3, 'doc'), '3 lines in doc');
+});
+
+test('the shared markdown.js formats answers (full tests in Spotlight)', () => {
+    assertEqual(markdownMarkup('**a** `b<c>`\n- d'), '<b>a</b> <tt>b&lt;c&gt;</tt>\n•  d');
+    assertEqual(plainText('**a** [x](https://y.z)'), 'a x (https://y.z)');
 });
 
 test('tokenize keeps spacing and renderTokens fades words in order', () => {

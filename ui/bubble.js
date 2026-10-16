@@ -7,6 +7,11 @@
 //   setActions([...])        chips under the text: {label, onActivate}
 //   flash(text)              briefly confirm something ("Copied")
 //   placeNear(rect) / placeAt(x, y), show(), hide()
+//   setFormat('markdown')    render the body's Markdown (the assistant's answers)
+//   setMaxBodyHeight(px)     scroll a longer body instead of growing past px
+//   setHistory([{question, answer}])  earlier turns of a conversation, above the body
+//   setHint(text)            a quiet line under the chips ("Type a follow-up")
+//   scrollBy(pages)          scroll the body (keyboard); returns whether it moved
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -15,7 +20,8 @@ import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
-import {renderTokens, tokenize} from './textReveal.js';
+import {markdownMarkup, renderMarkdown} from './markdown.js';
+import {escapeMarkup, renderTokens, tokenize} from './textReveal.js';
 
 // Timing, in milliseconds. Words start one after another and fade in
 // individually, which reads as calm streaming rather than a typewriter.
@@ -57,6 +63,9 @@ class AgentBubble extends St.BoxLayout {
         this._headlineText = '';
         this._actionsSignature = null;
         this._chips = [];
+        this._format = 'plain';
+        this._follow = true;         // keep the newest words in view while streaming
+        this._scrolling = false;     // a scroll this card made, not the user
 
         this._headline = new St.Label({style_class: 'sv-bubble-headline', x_expand: true});
         this._thinking = new St.Label({style_class: 'sv-bubble-thinking', text: '•••', visible: false});
@@ -65,11 +74,36 @@ class AgentBubble extends St.BoxLayout {
         header.add_child(this._thinking);
 
         this._body = new St.Label({style_class: 'sv-bubble-body', visible: false});
-        const text = this._body.clutter_text;
-        text.line_wrap = true;
-        text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        text.ellipsize = Pango.EllipsizeMode.NONE;
-        text.use_markup = true;
+        this._history = new St.Label({style_class: 'sv-bubble-history', visible: false});
+        for (const label of [this._body, this._history]) {
+            const text = label.clutter_text;
+            text.line_wrap = true;
+            text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            text.ellipsize = Pango.EllipsizeMode.NONE;
+            text.use_markup = true;
+        }
+        // Earlier turns and the body scroll together once taller than the limit.
+        const content = new St.BoxLayout({
+            style_class: 'sv-bubble-content',
+            orientation: Clutter.Orientation.VERTICAL,
+        });
+        content.add_child(this._history);
+        content.add_child(this._body);
+        this._scroll = new St.ScrollView({
+            style_class: 'sv-bubble-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            overlay_scrollbars: true,
+            child: content,
+        });
+        const adjustment = this._adjustment;
+        adjustment.connect('notify::upper', () => this._keepFollowing());
+        adjustment.connect('notify::page-size', () => this._keepFollowing());
+        adjustment.connect('notify::value', () => {
+            if (!this._scrolling)
+                this._follow = this._atBottom();
+        });
+        this._hint = new St.Label({style_class: 'sv-bubble-hint', visible: false});
 
         // Chips are packed into rows by their real widths (Clutter's
         // FlowLayout would give every column the width of the widest chip).
@@ -80,8 +114,9 @@ class AgentBubble extends St.BoxLayout {
         });
 
         this.add_child(header);
-        this.add_child(this._body);
+        this.add_child(this._scroll);
         this.add_child(this._actions);
+        this.add_child(this._hint);
 
         // Frosted glass: blur whatever is behind the card, where supported.
         try {
@@ -184,6 +219,71 @@ class AgentBubble extends St.BoxLayout {
 
         this._body.show();
         this._startReveal();
+    }
+
+    /** 'markdown' renders the body's Markdown; 'plain' (the default) shows it as written. */
+    setFormat(format) {
+        this._format = format;
+    }
+
+    /** Scroll a body taller than this many pixels; 0 lets it grow. */
+    setMaxBodyHeight(pixels) {
+        this._scroll.style = pixels > 0 ? `max-height: ${Math.round(pixels)}px;` : null;
+    }
+
+    /**
+     * Earlier turns of a conversation, shown quietly above the body.
+     *
+     * @param {Array<{question: string, answer: string}>} turns
+     */
+    setHistory(turns) {
+        const render = text => this._format === 'markdown' ? markdownMarkup(text) : escapeMarkup(text);
+        const markup = turns.map(turn =>
+            `<b>${escapeMarkup(turn.question)}</b>\n${render(turn.answer.trim())}`).join('\n\n');
+        this._history.clutter_text.set_markup(markup ? `${markup}\n` : '');
+        this._history.visible = turns.length > 0;
+        this._follow = true;
+    }
+
+    setHint(text) {
+        this._hint.text = text ?? '';
+        this._hint.visible = Boolean(text);
+    }
+
+    /** Scroll the body by pages (negative: up). Returns whether it moved. */
+    scrollBy(pages) {
+        const adjustment = this._adjustment;
+        const before = adjustment.value;
+        const top = Math.max(adjustment.lower, adjustment.upper - adjustment.page_size);
+        adjustment.value = Math.max(adjustment.lower, Math.min(top, before + pages * adjustment.page_size * 0.9));
+        this._follow = this._atBottom();
+        return adjustment.value !== before;
+    }
+
+    get historyText() {
+        return this._history.visible ? this._history.clutter_text.text : '';
+    }
+
+    get hintText() {
+        return this._hint.visible ? this._hint.text : '';
+    }
+
+    get _adjustment() {
+        return this._scroll.vadjustment ?? this._scroll.get_vscroll_bar().get_adjustment();
+    }
+
+    _atBottom() {
+        const adjustment = this._adjustment;
+        return adjustment.value >= adjustment.upper - adjustment.page_size - 4;
+    }
+
+    _keepFollowing() {
+        if (!this._follow)
+            return;
+        const adjustment = this._adjustment;
+        this._scrolling = true;
+        adjustment.value = Math.max(adjustment.lower, adjustment.upper - adjustment.page_size);
+        this._scrolling = false;
     }
 
     /** The body text as plain text. */
@@ -320,6 +420,7 @@ class AgentBubble extends St.BoxLayout {
     _clearBody() {
         this._stopReveal();
         this._tokens = [];
+        this._follow = true;
         this._body.clutter_text.set_markup('');
         this._body.hide();
     }
@@ -328,7 +429,8 @@ class AgentBubble extends St.BoxLayout {
         if (this._revealId)
             return;
         const tick = () => {
-            const {markup, done} = renderTokens(this._tokens, GLib.get_monotonic_time() / 1000, WORD_FADE_MS);
+            const render = this._format === 'markdown' ? renderMarkdown : renderTokens;
+            const {markup, done} = render(this._tokens, GLib.get_monotonic_time() / 1000, WORD_FADE_MS);
             this._body.clutter_text.set_markup(markup);
             if (done) {
                 this._revealId = 0;

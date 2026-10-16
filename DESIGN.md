@@ -38,9 +38,16 @@ about.
 
 - **Headline:** one short line, sentence case, no trailing full stop. Facts joined
   with " · ", most specific first: `Wi-Fi network “HomeNet” · QR code for example.com`.
-- **Body:** the content (recognised text, an answer). At most ~280 characters;
-  longer content is shortened at a word boundary with "…" and is always available
-  in full through an action (e.g. Copy).
+- **Body:** the content (recognised text, an answer). In ScreenVision at most ~280
+  characters; longer content is shortened at a word boundary with "…" and is always
+  available in full through an action (e.g. Copy). The assistant's answers in Spotlight
+  may be longer (sized to the question, under ~250 words): they are formatted from
+  Markdown (bold, lists, `code`) and scroll inside the card past half the screen's
+  height, following the newest words while they stream in.
+- **History:** in a conversation, earlier questions and answers sit quietly above the
+  body (smaller, dimmed) and scroll with it.
+- **Hint:** an optional quiet line under the chips saying what typing does
+  ("Type a follow-up · Esc for results").
 - **Chips:** up to five, ordered by how likely they are wanted. The first is styled
   as primary (blue). Labels are verbs: "Copy", "Open example.com", "Lens".
 
@@ -88,6 +95,11 @@ bubble.setActions([{label: 'Copy', onActivate}]);        // chips
 bubble.flash('Text copied');                             // confirmation
 bubble.placeNear(rect, avoidRect);                       // position
 bubble.show(); bubble.hide();
+bubble.setFormat('markdown');                            // the assistant's answers
+bubble.setMaxBodyHeight(px);                             // scroll beyond this height
+bubble.setHistory([{question, answer}]);                 // earlier turns of a conversation
+bubble.setHint('Type a follow-up · Esc for results');
+bubble.scrollBy(pages);                                  // keyboard scrolling
 ```
 
 `stream()` exists for the assistant: when a language model answers, its tokens
@@ -139,5 +151,5 @@ same action.
 ## Sharing across components
 
 Until a shared design package exists in the umbrella repository, components copy
-`ui/bubble.js`, `ui/textReveal.js` and the `.sv-bubble*` styles, and keep them in
+`ui/bubble.js`, `ui/textReveal.js`, `ui/markdown.js` and the `.sv-bubble*` styles, and keep them in
 sync with this document.
