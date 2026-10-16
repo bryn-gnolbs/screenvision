@@ -73,15 +73,14 @@ function inline(text, at, style, add) {
             continue;
         add(text.slice(last, match.index), at + last, style);
         const start = at + match.index;
-        if (match[1] !== undefined) {
+        if (match[1] !== undefined)
             add(match[1], start + 1, {...style, code: true});
-        } else if (match[2] !== undefined) {
+        else if (match[2] !== undefined)
             inline(match[2], start + 2, {...style, bold: true}, add);
-        } else if (match[3] !== undefined) {
+        else if (match[3] !== undefined)
             inline(match[3], start + 1, {...style, italic: true}, add);
-        } else if (match[4] !== undefined) {
+        else if (match[4] !== undefined)
             inline(match[4], start + 1, {...style, link: true}, add);
-        }
         last = match.index + match[0].length;
     }
     add(text.slice(last), at + last, style);
